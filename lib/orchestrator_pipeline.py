@@ -169,6 +169,10 @@ def _persist_pipeline_outputs(
     latest_summary_path = latest_dir / "pipeline-summary.md"
     meta_path = run_dir / "meta.json"
     latest_meta_path = latest_dir / "run.json"
+    decisions_dir = run_dir / "decisions"
+    context_pack_path = decisions_dir / "context-pack.json"
+    stage_results_path = decisions_dir / "stage-results.json"
+    final_gate_path = decisions_dir / "final-gate.json"
 
     summary_content = _build_pipeline_summary(
         run_id=run_id,
@@ -186,6 +190,34 @@ def _persist_pipeline_outputs(
     orch._write_text(summary_path, summary_content)
     orch._write_text(latest_summary_path, summary_content)
 
+    context_pack_payload = {
+        "run_id": run_id,
+        "task": task,
+        "mode": mode,
+        "status": status,
+        "current_stage": state["pipeline"].get("current_stage", ""),
+        "retry_count": state["pipeline"].get("retry_count", 0),
+    }
+    orch._write_json(context_pack_path, context_pack_payload)
+    stage_results_path.parent.mkdir(parents=True, exist_ok=True)
+    stage_results_path.write_text(
+        json.dumps(stage_results, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    final_gate_payload = {
+        "status": status,
+        "error": error,
+        "finished_at": state["pipeline"].get("finished_at", ""),
+        "verify_hint": "./scripts/verify",
+    }
+    orch._write_json(final_gate_path, final_gate_payload)
+
+    decision_files = {
+        "context-pack.json": str(context_pack_path),
+        "stage-results.json": str(stage_results_path),
+        "final-gate.json": str(final_gate_path),
+    }
+
     meta_payload = {
         "run_id": run_id,
         "task": task,
@@ -198,6 +230,8 @@ def _persist_pipeline_outputs(
         "error": error,
         "stage_results": stage_results,
         "artifacts": artifacts,
+        "decisions_dir": str(decisions_dir),
+        "decision_files": decision_files,
         "state_file": str(orch.state_path),
     }
     orch._write_json(meta_path, meta_payload)
@@ -220,6 +254,8 @@ def _persist_pipeline_outputs(
     state["pipeline"]["meta_file"] = str(meta_path)
     state["pipeline"]["latest_summary_file"] = str(latest_summary_path)
     state["pipeline"]["latest_meta_file"] = str(latest_meta_path)
+    state["pipeline"]["decisions_dir"] = str(decisions_dir)
+    state["pipeline"]["decision_files"] = decision_files
 
     project_registry_path = ensure_project_registry(
         orch.root,
@@ -249,6 +285,9 @@ def _persist_pipeline_outputs(
     registry_artifacts = {
         "pipeline-summary.md": str(summary_path),
         "meta.json": str(meta_path),
+        "decisions/context-pack.json": str(context_pack_path),
+        "decisions/stage-results.json": str(stage_results_path),
+        "decisions/final-gate.json": str(final_gate_path),
     }
     registry_artifacts.update(artifacts)
     write_run_registry(
@@ -268,6 +307,8 @@ def _persist_pipeline_outputs(
         "latest_summary_file": str(latest_summary_path),
         "latest_meta_file": str(latest_meta_path),
         "artifacts": artifacts,
+        "decisions_dir": str(decisions_dir),
+        "decision_files": decision_files,
     }
 
 

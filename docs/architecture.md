@@ -66,9 +66,22 @@ Enforced by `./scripts/arch-check`.
 - 位置：`codex/gemini` 结构化决策产出后、`team-summary` 汇总前，输出 `winner`、`confidence`、`ask`、`conflicts`。
 - 决策产物：`.ai/team/runs/<run-id>/decisions/` 下落盘 `context-pack.json`、`codex.json`、`gemini.json`、`arbiter.json`，用于审计与复现。
 - Gate 控制：`OMO_TEAM_ARBITER_GATE=off|soft|strict`；默认兼容策略为 `soft`（保留历史输出契约，仅附加 arbiter 决策，不自动阻断），`strict` 才执行 fail-fast 阻断，`off` 完全回退旧行为。
+- `team` 返回 `exit_code` 语义：`0` 表示成功；`1` 表示一般失败；`42` 表示 `OMO_TEAM_ARBITER_GATE=strict` 且 arbiter 判定 `ask/fail-fast` 时的 gate 阻断。
 
 ### English (EN)
 - Module: `lib/decision_arbiter.py` (wired into the `team` runtime path)
 - Placement: after structured `codex/gemini` decisions and before final `team-summary`, returning `winner`, `confidence`, `ask`, and `conflicts`.
 - Decision artifacts: `.ai/team/runs/<run-id>/decisions/` persists `context-pack.json`, `codex.json`, `gemini.json`, and `arbiter.json` for auditability and replay.
 - Gate control: `OMO_TEAM_ARBITER_GATE=off|soft|strict`; default compatibility strategy is `soft` (keep legacy output contract, append arbiter decisions, no automatic blocking), while `strict` enforces fail-fast blocking and `off` fully falls back to legacy behavior.
+- `team` return `exit_code` semantics: `0` means success; `1` means general failure; `42` means gate blocking when `OMO_TEAM_ARBITER_GATE=strict` and arbiter reports `ask/fail-fast`.
+
+## Pipeline Decisions Artifacts
+### 中文（ZH）
+- 路径：`.omo/runs/pipeline/<run-id>/decisions.jsonl`
+- 最新指针：`.omo/latest/pipeline.json` 的 `decisions_file` 字段。
+- 用途：按 stage 记录 pipeline 决策，便于审计与复现。
+
+### English (EN)
+- Path: `.omo/runs/pipeline/<run-id>/decisions.jsonl`
+- Latest pointer: `decisions_file` in `.omo/latest/pipeline.json`.
+- Purpose: stage-level pipeline decision records for auditability and replay.

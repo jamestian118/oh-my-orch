@@ -626,6 +626,12 @@ def run_team(
     viewpoints_ok = len(viewpoint_failures) == 0
     team_ok = stage0.ok and viewpoints_ok and all(item["returncode"] == 0 for item in summary_steps)
     run_status = "completed" if team_ok else "failed"
+    if team_ok:
+        exit_code = 0
+    elif gate_failed:
+        exit_code = 42
+    else:
+        exit_code = 1
     ran_at = utc_now()
     arbiter_payload = {
         **arbiter_result,
@@ -647,6 +653,7 @@ def run_team(
         "topic": topic,
         "mode": mode,
         "ran_at": ran_at,
+        "exit_code": exit_code,
         "stage0_ok": stage0.ok,
         "viewpoints_ok": viewpoints_ok,
         "viewpoint_failures": viewpoint_failures,
@@ -698,6 +705,7 @@ def run_team(
     orch.save_state(state)
     return {
         "ok": team_ok,
+        "exit_code": exit_code,
         "command": "team",
         "mode": mode,
         "topic": topic,

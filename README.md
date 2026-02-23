@@ -66,11 +66,13 @@ python omo.py pipeline "接入 SSO 登录"
 - 关键产物（兼容入口）：`.ai/project-brief.md`、`.ai/exec-plan.md`、`.ai/review.md`
 - Pipeline 产物目录：`.ai/pipeline/runs/<run-id>/`（每次运行新目录；`run-id` 命名为“日期-时间-梗概-短哈希”：`YYYYMMDD-HHMMSS-<summary>-<short-hash>`，时间为北京时间 `Asia/Shanghai`；含 `project-brief.md`、`exec-plan.md`、`review.md`、`pipeline-summary.md`、`meta.json`）
 - Pipeline 最新快照：`.ai/pipeline/latest/`（含 `pipeline-summary.md`、`run.json`）
+- Pipeline decisions artifacts：`.omo/runs/pipeline/<run-id>/decisions.jsonl`（按 stage 记录决策；latest pointer 在 `.omo/latest/pipeline.json` 的 `decisions_file` 字段）
 - Team 产物目录：`.ai/team/runs/<run-id>/`（`run-id` 同样使用北京时间 `Asia/Shanghai`，格式 `YYYYMMDD-HHMMSS-<summary>-<short-hash>`；示例：`20260223-184512-auth-refactor-a1b2c3d4`；含 `agents/*.md`、`team-summary.md`、`meta.json`）
 - Team decisions artifacts：`.ai/team/runs/<run-id>/decisions/`（`context-pack.json`、`codex.json`、`gemini.json`、`arbiter.json`）
 - Team 最新摘要：`.ai/team/latest/team-summary.md`
 - 最终 team summary 由 Gemini 汇总输出（基于 team viewpoints）。
 - `OMO_TEAM_ARBITER_GATE`（`off|soft|strict`）：`off` 关闭 team arbiter gate（兼容旧行为）；`soft`（默认）写入 decisions artifacts 但不阻断；`strict` 在 arbiter 判定 `ask/fail-fast` 时阻断并返回失败状态。
+- Team 命令返回 `exit_code` 语义：`0` 表示成功；`1` 表示一般失败（非 arbiter gate 失败）；`42` 表示 `OMO_TEAM_ARBITER_GATE=strict` 且 arbiter 判定 `ask/fail-fast` 触发 gate 阻断。
 
 #### flags
 - `-h, --help`：顶层命令和各子命令都支持帮助信息
@@ -157,11 +159,13 @@ python omo.py pipeline "Integrate SSO login"
 - Key artifacts (compat paths): `.ai/project-brief.md`, `.ai/exec-plan.md`, `.ai/review.md`
 - Pipeline artifacts: `.ai/pipeline/runs/<run-id>/` (new directory per run; `run-id` format `YYYYMMDD-HHMMSS-<summary>-<short-hash>` in Beijing time `Asia/Shanghai`; includes `project-brief.md`, `exec-plan.md`, `review.md`, `pipeline-summary.md`, `meta.json`)
 - Latest pipeline snapshot: `.ai/pipeline/latest/` (contains `pipeline-summary.md`, `run.json`)
+- Pipeline decisions artifacts: `.omo/runs/pipeline/<run-id>/decisions.jsonl` (stage-level decisions; latest pointer is the `decisions_file` field in `.omo/latest/pipeline.json`)
 - Team artifacts: `.ai/team/runs/<run-id>/` (`run-id` also uses Beijing time `Asia/Shanghai` with `YYYYMMDD-HHMMSS-<summary>-<short-hash>`; example: `20260223-184512-auth-refactor-a1b2c3d4`; includes `agents/*.md`, `team-summary.md`, `meta.json`)
 - Team decisions artifacts: `.ai/team/runs/<run-id>/decisions/` (`context-pack.json`, `codex.json`, `gemini.json`, `arbiter.json`)
 - Latest team summary: `.ai/team/latest/team-summary.md`
 - The final team summary is consolidated by Gemini (from team viewpoints).
 - `OMO_TEAM_ARBITER_GATE` (`off|soft|strict`): `off` disables the team arbiter gate (legacy-compatible behavior); `soft` (default) writes decisions artifacts without blocking; `strict` blocks and returns failed status on arbiter `ask/fail-fast`.
+- Team command `exit_code` semantics: `0` means success; `1` means general failure (non-arbiter-gate failure); `42` means `OMO_TEAM_ARBITER_GATE=strict` blocked on arbiter `ask/fail-fast`.
 
 #### flags
 - `-h, --help`: available on the top-level command and every subcommand

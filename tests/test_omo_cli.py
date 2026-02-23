@@ -169,3 +169,19 @@ def test_history_and_compress_flags_forwarded(monkeypatch, capsys) -> None:
             "dry_run": True,
         }
     ]
+
+
+def test_main_prefers_payload_exit_code(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(
+        omo,
+        "_dispatch",
+        lambda _ns: {"ok": True, "command": "status", "exit_code": 42},
+    )
+
+    exit_code = omo.main(["status"])
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+
+    assert exit_code == 42
+    assert payload["ok"] is True
+    assert payload["exit_code"] == 42

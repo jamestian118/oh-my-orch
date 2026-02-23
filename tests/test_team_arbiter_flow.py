@@ -103,6 +103,7 @@ def test_team_arbiter_gate_off_keeps_compatibility_and_writes_decisions(
     result = orch.team(topic="team arbiter gate off compatibility", dry_run=False)
 
     assert result["ok"] is True
+    assert result["exit_code"] == 0
     assert result["arbiter"]["gate_mode"] == "soft"
     run_dir = Path(result["run_dir"])
     _assert_decisions_artifacts(run_dir, ask_expected=True)
@@ -121,6 +122,7 @@ def test_team_arbiter_gate_on_blocks_when_ask_true_and_returns_arbiter(
     result = orch.team(topic="team arbiter gate on ask true", dry_run=False)
 
     assert result["ok"] is False
+    assert result["exit_code"] == 42
     assert result["arbiter"]["gate_mode"] == "strict"
     _assert_arbiter_shape(result["arbiter"], ask_expected=True)
 

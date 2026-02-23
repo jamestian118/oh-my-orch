@@ -3,6 +3,32 @@
 > 规则：动态进度只写在这里；不要把动态内容写进 docs/ 或长期规范文件。
 
 ## 最新交接（追加在最上方）
+- Date：2026-02-24 00:46:14 (Asia/Shanghai)
+- Branch：ai/20260223-omo-step1-6
+- Commit：d0a06db
+- git status（摘要）：`M lib/orchestrator_pipeline.py`、`M lib/orchestrator_team.py`、`M omo.py`、`M tests/test_pipeline_run_registry.py`、`M tests/test_team_arbiter_flow.py`、`M tests/test_omo_cli.py`、`M README.md`、`M docs/architecture.md`
+- 最小验证命令：`./scripts/verify`
+- 关键输出摘录（key output excerpts）：
+  - `./scripts/verify -> [verify] OK`
+  - `pytest -> 37 passed in 32.62s`
+  - `新增 team exit_code + pipeline decisions artifacts（context-pack/stage-results/final-gate）`
+
+### Done
+- team 增加 machine-readable `exit_code`（`0/1/42`）并写入 `meta.json`，CLI `omo.py` 优先透传 payload `exit_code`。
+- pipeline 增加 `.ai/pipeline/runs/<run_id>/decisions/` 证据链：
+  - `context-pack.json`
+  - `stage-results.json`
+  - `final-gate.json`
+- pipeline 返回 payload 新增 `decisions_dir` 与 `decision_files`（非破坏性增量字段）。
+- 文档同步：`README.md`、`docs/architecture.md` 补齐 team `exit_code` 与 pipeline decisions artifacts 契约。
+
+### Next Steps（3-8 条，按优先级）
+1. 提交本阶段改动（stage3: team exit_code + pipeline decisions artifacts + docs/tests）。
+2. 如需更强 machine-readable 语义，可把 team `exit_code` 规则抽到常量模块统一管理。
+3. 评估是否在 `pipeline` 也增加 `exit_code` 字段（与 team 统一输出风格）。
+4. 若要对外集成 CI/脚本，可补充一条 `jq` 示例，直接消费 `decision_files` 与 `arbiter` 字段。
+
+## 上一交接（2026-02-24 00:38:26）
 - Date：2026-02-24 00:38:26 (Asia/Shanghai)
 - Branch：ai/20260223-omo-step1-6
 - Commit：3f56f0f

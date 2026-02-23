@@ -192,6 +192,13 @@ def _dispatch(ns: argparse.Namespace) -> dict[str, Any]:
     raise ValueError(f"unsupported command: {command}")
 
 
+def _resolve_exit_code(payload: dict[str, Any], *, ok_default: bool) -> int:
+    exit_code = payload.get("exit_code")
+    if type(exit_code) is int:
+        return exit_code
+    return 0 if bool(payload.get("ok", ok_default)) else 1
+
+
 def main(argv: list[str] | None = None) -> int:
     args = list(argv) if argv is not None else sys.argv[1:]
     try:
@@ -208,13 +215,13 @@ def main(argv: list[str] | None = None) -> int:
                 dry_run=at_call["dry_run"],
             )
             _print_json(payload)
-            return 0 if payload.get("ok") else 1
+            return _resolve_exit_code(payload, ok_default=False)
 
         parser = _build_parser()
         ns = parser.parse_args(args)
         payload = _dispatch(ns)
         _print_json(payload)
-        return 0 if payload.get("ok", True) else 1
+        return _resolve_exit_code(payload, ok_default=True)
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2

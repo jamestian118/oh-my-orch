@@ -13,6 +13,7 @@ def test_pipeline_dual_writes_run_registry_without_breaking_legacy_contract(tmp_
 
     result = orch.pipeline(task="pipeline run registry dual write", dry_run=True)
     run_id = str(result["run_id"])
+    run_dir = Path(result["run_dir"])
 
     project_registry_path = tmp_path / ".omo" / "project.json"
     assert project_registry_path.exists()
@@ -38,3 +39,30 @@ def test_pipeline_dual_writes_run_registry_without_breaking_legacy_contract(tmp_
 
     assert Path(result["meta_file"]).exists()
     assert Path(result["summary_file"]).exists()
+
+    decisions_dir = run_dir / "decisions"
+    context_pack_file = decisions_dir / "context-pack.json"
+    stage_results_file = decisions_dir / "stage-results.json"
+    final_gate_file = decisions_dir / "final-gate.json"
+    decision_files = dict(result["decision_files"])
+
+    assert Path(result["decisions_dir"]) == decisions_dir
+    assert context_pack_file.exists()
+    assert stage_results_file.exists()
+    assert final_gate_file.exists()
+    assert decision_files["context-pack.json"] == str(context_pack_file)
+    assert decision_files["stage-results.json"] == str(stage_results_file)
+    assert decision_files["final-gate.json"] == str(final_gate_file)
+
+    context_pack_payload = json.loads(context_pack_file.read_text(encoding="utf-8"))
+    assert context_pack_payload["run_id"] == run_id
+    assert context_pack_payload["task"] == "pipeline run registry dual write"
+
+    stage_results_payload = json.loads(stage_results_file.read_text(encoding="utf-8"))
+    assert isinstance(stage_results_payload, list)
+    assert stage_results_payload
+    assert stage_results_payload[0]["stage"] == "stage0_project_brief"
+
+    final_gate_payload = json.loads(final_gate_file.read_text(encoding="utf-8"))
+    assert final_gate_payload["status"] == "completed"
+    assert "verify_hint" in final_gate_payload
