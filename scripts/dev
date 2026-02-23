@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# scripts/dev (python)
+# 说明：启动开发入口（默认运行 src/main.py）
+
+source .venv/bin/activate
+python -m src.main "$@"

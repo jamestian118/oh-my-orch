@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# scripts/test (python)
+# 说明：运行测试（pytest）
+
+source .venv/bin/activate
+python -m pytest -q

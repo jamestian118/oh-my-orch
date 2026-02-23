@@ -1,0 +1,15 @@
+name: docs-check
+on:
+  pull_request:
+  push:
+    branches: [ main ]
+
+jobs:
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: chmod scripts
+        run: chmod +x ./scripts/* || true
+      - name: docs-check
+        run: ./scripts/docs-check

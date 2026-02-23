@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+set -uo pipefail
+
+# scripts/gc
+# 抗熵检查入口：扫描项目中违反 golden principles 的 drift，输出报告
+# 默认非阻断（exit 0）；传入 --strict 时 drift>0 则 exit 1
+
+STRICT=0
+for arg in "$@"; do [ "$arg" = "--strict" ] && STRICT=1; done
+
+cd "$(dirname "$0")/.." || exit 0
+
+drift=0
+
+echo "=== [gc] Drift Report ==="
+
+# 检查 1：scripts/ 下的可执行脚本是否都在 docs/scripts.md 中有记录
+echo ""
+echo "--- 检查 1: scripts/ 可执行脚本文档覆盖 ---"
+if [ -d scripts ] && [ -f docs/scripts.md ]; then
+  for s in scripts/*; do
+    [ -x "$s" ] || continue
+    name=$(basename "$s")
+    if ! grep -F -x -q "### $name" docs/scripts.md; then
+      echo "[DRIFT] 脚本 '$name' 未在 docs/scripts.md 中记录"
+      drift=1
+    fi
+  done
+fi
+
+# 检查 2：裸 TODO（不含 issue 编号或日期）
+echo ""
+echo "--- 检查 2: 裸 TODO ---"
+bare=$(grep -rn "TODO" --include="*" . \
+  --exclude-dir=.git --exclude-dir=node_modules --exclude-dir=.venv \
+  --exclude=gc --exclude=quality.md --exclude=scripts.md \
+  | grep -v "TODO(#" | grep -v "TODO(20" || true)
+if [ -n "$bare" ]; then
+  echo "$bare"
+  drift=1
+fi
+
+# 检查 3：docs/ 中是否混入动态进度（日期模式）
+echo ""
+echo "--- 检查 3: docs/ 动态进度 ---"
+if [ -d docs ]; then
+  dates=$(grep -rn "20[0-9][0-9]-[0-9][0-9]-[0-9][0-9]" docs/ --exclude=quality.md || true)
+  if [ -n "$dates" ]; then
+    echo "$dates"
+    drift=1
+  fi
+fi
+
+# 检查 4：src/ 下重复函数名
+echo ""
+echo "--- 检查 4: 重复函数定义 ---"
+if [ -d src ]; then
+  dupes=$(grep -rhn '\(def \|function \|func \)\([a-zA-Z_][a-zA-Z0-9_]*\)' src/ \
+    --include="*.py" --include="*.js" --include="*.ts" --include="*.go" \
+    -o 2>/dev/null \
+    | sed 's/^def //;s/^function //;s/^func //' | sort | uniq -d || true)
+  if [ -n "$dupes" ]; then
+    for fn in $dupes; do
+      files=$(grep -rln "\(def \|function \|func \)$fn" src/ --include="*.py" --include="*.js" --include="*.ts" --include="*.go" 2>/dev/null || true)
+      echo "[DRIFT] 重复函数 '$fn' 出现在: $files"
+    done
+    drift=1
+  fi
+fi
+
+echo ""
+if [ "$drift" -eq 0 ]; then
+  echo "[gc] 全部通过，无 drift"
+else
+  echo "[gc] 发现 drift，请修复上述问题"
+fi
+
+[ "$STRICT" -eq 1 ] && [ "$drift" -gt 0 ] && exit 1
+exit 0

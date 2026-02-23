@@ -1,0 +1,580 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+cd "$(dirname "$0")/.." || exit 1
+
+SCRIPT_NAME="publish"
+DEFAULT_BASE_BRANCH="main"
+DEFAULT_COMMIT_MESSAGE="chore: auto commit before publish"
+DEFAULT_REVIEW_COMMENT="@codex review"
+DEFAULT_VISIBILITY="auto"
+DEFAULT_ARTIFACT_ROOT="${SANITIZED_PUBLISH_ARTIFACT_ROOT:-/Users/Zhuanz/Documents/Code/_sanitized_publish_artifacts}"
+ARTIFACT_HELPER="/Users/Zhuanz/Documents/Code/universal-harness-kit/scripts/sanitized-publish-artifacts"
+
+BASE_BRANCH="$DEFAULT_BASE_BRANCH"
+COMMIT_MESSAGE="$DEFAULT_COMMIT_MESSAGE"
+REVIEW_COMMENT="$DEFAULT_REVIEW_COMMENT"
+REQUESTED_VISIBILITY="$DEFAULT_VISIBILITY"
+ARTIFACT_ROOT="$DEFAULT_ARTIFACT_ROOT"
+SKIP_FINALIZE=0
+SKIP_CODEX_REVIEW=0
+DRY_RUN=0
+
+RUN_DIR=""
+MANIFEST_JSON=""
+PUBLISH_RESULTS_JSON=""
+SCAN_TARGETS_NUL=""
+SECRETS_FINDINGS_FILE=""
+PII_FINDINGS_FILE=""
+SECRETS_COUNT=0
+PII_COUNT=0
+CLASSIFY_REASON=""
+RECOMMENDED_VISIBILITY="private"
+EXPECTED_VISIBILITY="private"
+ACTUAL_VISIBILITY=""
+VISIBILITY_MATCH="false"
+RESULT_STATUS="pending"
+ERROR_MESSAGE=""
+STEP_SANITIZE="pending"
+STEP_CLASSIFY="pending"
+STEP_PUBLISH="pending"
+STEP_VISIBILITY_VERIFY="pending"
+PR_URL=""
+REPO_SLUG=""
+REPO_URL=""
+BRANCH=""
+
+log() {
+  echo "[$SCRIPT_NAME] $*"
+}
+
+json_escape() {
+  local value="$1"
+  value=${value//\\/\\\\}
+  value=${value//\"/\\\"}
+  value=${value//$'\n'/\\n}
+  value=${value//$'\r'/\\r}
+  value=${value//$'\t'/\\t}
+  printf '%s' "$value"
+}
+
+json_bool_from_int() {
+  if [ "$1" -eq 1 ]; then
+    printf 'true'
+  else
+    printf 'false'
+  fi
+}
+
+json_bool_from_zero_count() {
+  if [ "$1" -eq 0 ]; then
+    printf 'true'
+  else
+    printf 'false'
+  fi
+}
+
+json_bool_from_str() {
+  if [ "$1" = "true" ]; then
+    printf 'true'
+  else
+    printf 'false'
+  fi
+}
+
+write_manifest_json() {
+  [ -n "$MANIFEST_JSON" ] || return 0
+
+  local now
+  now="$(date '+%Y-%m-%dT%H:%M:%S%z')"
+
+  cat >"$MANIFEST_JSON" <<JSON
+{
+  "schema_version": "1.0",
+  "generated_at": "$(json_escape "$now")",
+  "pipeline": ["sanitize", "classify", "publish", "visibility-verify"],
+  "cwd": "$(json_escape "$(pwd)")",
+  "run_dir": "$(json_escape "$RUN_DIR")",
+  "inputs": {
+    "branch": "$(json_escape "$BRANCH")",
+    "base_branch": "$(json_escape "$BASE_BRANCH")",
+    "requested_visibility": "$(json_escape "$REQUESTED_VISIBILITY")",
+    "expected_visibility": "$(json_escape "$EXPECTED_VISIBILITY")",
+    "skip_finalize": $(json_bool_from_int "$SKIP_FINALIZE"),
+    "skip_codex_review": $(json_bool_from_int "$SKIP_CODEX_REVIEW"),
+    "dry_run": $(json_bool_from_int "$DRY_RUN")
+  },
+  "sanitize": {
+    "secrets_check": {
+      "engine": "regex",
+      "findings_file": "$(json_escape "$SECRETS_FINDINGS_FILE")",
+      "count": $SECRETS_COUNT,
+      "passed": $(json_bool_from_zero_count "$SECRETS_COUNT")
+    },
+    "pii_heuristic": {
+      "engine": "regex",
+      "findings_file": "$(json_escape "$PII_FINDINGS_FILE")",
+      "count": $PII_COUNT,
+      "passed": $(json_bool_from_zero_count "$PII_COUNT")
+    }
+  },
+  "classify": {
+    "recommended_visibility": "$(json_escape "$RECOMMENDED_VISIBILITY")",
+    "reason": "$(json_escape "$CLASSIFY_REASON")"
+  }
+}
+JSON
+}
+
+write_publish_results() {
+  [ -n "$PUBLISH_RESULTS_JSON" ] || return 0
+
+  local now
+  now="$(date '+%Y-%m-%dT%H:%M:%S%z')"
+
+  cat >"$PUBLISH_RESULTS_JSON" <<JSON
+{
+  "schema_version": "1.0",
+  "generated_at": "$(json_escape "$now")",
+  "status": "$(json_escape "$RESULT_STATUS")",
+  "error_message": "$(json_escape "$ERROR_MESSAGE")",
+  "dry_run": $(json_bool_from_int "$DRY_RUN"),
+  "branch": "$(json_escape "$BRANCH")",
+  "steps": {
+    "sanitize": "$(json_escape "$STEP_SANITIZE")",
+    "classify": "$(json_escape "$STEP_CLASSIFY")",
+    "publish": "$(json_escape "$STEP_PUBLISH")",
+    "visibility_verify": "$(json_escape "$STEP_VISIBILITY_VERIFY")"
+  },
+  "visibility": {
+    "requested": "$(json_escape "$REQUESTED_VISIBILITY")",
+    "recommended": "$(json_escape "$RECOMMENDED_VISIBILITY")",
+    "expected": "$(json_escape "$EXPECTED_VISIBILITY")",
+    "actual": "$(json_escape "$ACTUAL_VISIBILITY")",
+    "match": $(json_bool_from_str "$VISIBILITY_MATCH")
+  },
+  "repo": {
+    "slug": "$(json_escape "$REPO_SLUG")",
+    "url": "$(json_escape "$REPO_URL")",
+    "pr_url": "$(json_escape "$PR_URL")"
+  },
+  "artifacts": {
+    "run_dir": "$(json_escape "$RUN_DIR")",
+    "manifest": "$(json_escape "$MANIFEST_JSON")"
+  }
+}
+JSON
+}
+
+fail() {
+  local message="$*"
+  ERROR_MESSAGE="$message"
+  RESULT_STATUS="failed"
+  echo "[$SCRIPT_NAME] FAIL: $message" >&2
+  if [ -n "$PUBLISH_RESULTS_JSON" ]; then
+    write_publish_results || true
+  fi
+  exit 1
+}
+
+usage() {
+  cat <<'USAGE'
+Usage:
+  ./scripts/publish [options]
+
+Options:
+  --base <branch>          PR base branch (default: main)
+  --commit-message <msg>   Commit message used when local changes exist
+  --skip-finalize          Skip ./scripts/milestone-finalize
+  --skip-codex-review      Skip posting '@codex review' on PR
+  --review-comment <text>  Override PR comment body (default: @codex review)
+  --visibility <mode>      Expected repo visibility: auto|public|private (default: auto)
+  --artifact-root <dir>    Artifact root directory for manifest/results
+  --dry-run                Run sanitize + classify only (skip publish/verify)
+  -h, --help               Show help
+
+Pipeline:
+  sanitize -> classify -> publish -> visibility-verify
+
+Machine-readable outputs:
+  <run_dir>/reports/manifest.json
+  <run_dir>/reports/publish-results.json
+USAGE
+}
+
+require_core_tools() {
+  command -v git >/dev/null 2>&1 || fail "git 未安装"
+  command -v grep >/dev/null 2>&1 || fail "grep 未安装"
+}
+
+require_publish_tools() {
+  command -v gh >/dev/null 2>&1 || fail "gh 未安装，请先安装并登录：brew install gh && gh auth login"
+}
+
+ensure_gh_auth() {
+  if ! gh auth status >/dev/null 2>&1; then
+    fail "gh 未登录，请先执行：gh auth login"
+  fi
+}
+
+ensure_git_repo() {
+  git rev-parse --is-inside-work-tree >/dev/null 2>&1 || fail "当前目录不是 git 仓库"
+}
+
+current_branch() {
+  local branch
+  branch="$(git symbolic-ref --short HEAD 2>/dev/null || true)"
+  [ -n "$branch" ] || fail "当前处于 detached HEAD，无法发布"
+  printf '%s\n' "$branch"
+}
+
+ensure_origin_remote() {
+  git remote get-url origin >/dev/null 2>&1 || fail "缺少 origin remote，请先设置 git remote"
+}
+
+create_run_dir() {
+  local run_dir=""
+
+  if [ -x "$ARTIFACT_HELPER" ]; then
+    run_dir="$("$ARTIFACT_HELPER" new --mode incremental --root "$ARTIFACT_ROOT" 2>/dev/null || true)"
+  fi
+
+  if [ -z "$run_dir" ]; then
+    local run_id
+    run_id="$(date '+%Y%m%d_%H%M%S')"
+    run_dir="$ARTIFACT_ROOT/runs/incremental_$run_id"
+    mkdir -p "$run_dir/reports" "$run_dir/work" || fail "创建 artifact 目录失败: $run_dir"
+  fi
+
+  [ -d "$run_dir" ] || fail "run 目录不存在: $run_dir"
+
+  RUN_DIR="$run_dir"
+  MANIFEST_JSON="$RUN_DIR/reports/manifest.json"
+  PUBLISH_RESULTS_JSON="$RUN_DIR/reports/publish-results.json"
+  SCAN_TARGETS_NUL="$RUN_DIR/work/scan-targets.zlist"
+  SECRETS_FINDINGS_FILE="$RUN_DIR/reports/secrets-findings.txt"
+  PII_FINDINGS_FILE="$RUN_DIR/reports/pii-findings.txt"
+}
+
+prepare_scan_targets() {
+  git ls-files -co --exclude-standard -z >"$SCAN_TARGETS_NUL"
+  local target_count
+  target_count="$(git ls-files -co --exclude-standard | wc -l | tr -d ' ')"
+  log "sanitize 扫描目标文件数: $target_count"
+}
+
+scan_regex_to_file() {
+  local regex="$1"
+  local output_file="$2"
+
+  : >"$output_file"
+  [ -s "$SCAN_TARGETS_NUL" ] || return 0
+
+  while IFS= read -r -d '' file; do
+    [ -f "$file" ] || continue
+    grep -nEIH "$regex" "$file" >>"$output_file" 2>/dev/null || true
+  done <"$SCAN_TARGETS_NUL"
+}
+
+run_sanitize() {
+  local secret_regex='(AKIA[0-9A-Z]{16}|ASIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|AIza[0-9A-Za-z_-]{35}|xox[baprs]-[A-Za-z0-9-]{10,}|sk-[A-Za-z0-9]{20,}|-----BEGIN (RSA|EC|OPENSSH|DSA|PGP) PRIVATE KEY-----)'
+  local pii_regex='(/Users/[A-Za-z0-9._-]+|/home/[A-Za-z0-9._-]+|10\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}|192\.168\.[0-9]{1,3}\.[0-9]{1,3}|172\.(1[6-9]|2[0-9]|3[0-1])\.[0-9]{1,3}\.[0-9]{1,3})'
+  local pii_placeholder_regex='(/Users/(yourname|username|example)|/home/(user|example)|<ip>|127\.0\.0\.1)'
+  local pii_allowlist_regex='(_sanitized_publish_artifacts|sanitized-publish-artifacts|SANITIZED_PUBLISH_ARTIFACT_ROOT|ARTIFACT_HELPER)'
+  local pii_raw_file="$RUN_DIR/work/pii-findings.raw.txt"
+
+  scan_regex_to_file "$secret_regex" "$SECRETS_FINDINGS_FILE"
+  scan_regex_to_file "$pii_regex" "$pii_raw_file"
+
+  if [ -s "$pii_raw_file" ]; then
+    grep -Eiv "$pii_placeholder_regex" "$pii_raw_file" | grep -Eiv "$pii_allowlist_regex" >"$PII_FINDINGS_FILE" || true
+  else
+    : >"$PII_FINDINGS_FILE"
+  fi
+
+  SECRETS_COUNT="$(wc -l <"$SECRETS_FINDINGS_FILE" | tr -d ' ')"
+  PII_COUNT="$(wc -l <"$PII_FINDINGS_FILE" | tr -d ' ')"
+
+  STEP_SANITIZE="completed"
+  log "sanitize 完成: secrets=$SECRETS_COUNT, pii=$PII_COUNT"
+}
+
+classify_visibility() {
+  local reason=""
+
+  if [ "$SECRETS_COUNT" -gt 0 ]; then
+    reason="secret findings=$SECRETS_COUNT"
+  fi
+
+  if [ "$PII_COUNT" -gt 0 ]; then
+    if [ -n "$reason" ]; then
+      reason="$reason; "
+    fi
+    reason="${reason}pii findings=$PII_COUNT"
+  fi
+
+  if [ -z "$reason" ]; then
+    RECOMMENDED_VISIBILITY="public"
+    CLASSIFY_REASON="no secret/PII findings"
+  else
+    RECOMMENDED_VISIBILITY="private"
+    CLASSIFY_REASON="$reason"
+  fi
+
+  STEP_CLASSIFY="completed"
+  log "classify 完成: recommended_visibility=$RECOMMENDED_VISIBILITY ($CLASSIFY_REASON)"
+}
+
+resolve_expected_visibility() {
+  case "$REQUESTED_VISIBILITY" in
+    auto)
+      EXPECTED_VISIBILITY="$RECOMMENDED_VISIBILITY"
+      ;;
+    public|private)
+      EXPECTED_VISIBILITY="$REQUESTED_VISIBILITY"
+      ;;
+    *)
+      fail "--visibility 仅支持 auto|public|private"
+      ;;
+  esac
+}
+
+enforce_publish_policy() {
+  if [ "$SECRETS_COUNT" -gt 0 ]; then
+    fail "sanitize 检测到 secrets（count=${SECRETS_COUNT}），发布已阻断，请先脱敏后重试"
+  fi
+
+  if [ "$EXPECTED_VISIBILITY" = "public" ] && [ "$PII_COUNT" -gt 0 ]; then
+    fail "public 发布被阻断：检测到 PII（count=${PII_COUNT}），请先脱敏或改为 --visibility private"
+  fi
+}
+
+commit_if_needed() {
+  local commit_message="$1"
+
+  if [ -z "$(git status --porcelain)" ]; then
+    log "工作区干净，跳过 commit"
+    return 0
+  fi
+
+  git add -A || fail "git add 失败"
+  if git diff --cached --quiet; then
+    log "无可提交改动，跳过 commit"
+    return 0
+  fi
+
+  git commit -m "$commit_message" || fail "git commit 失败"
+  log "已创建本地 commit"
+}
+
+push_branch() {
+  local branch="$1"
+
+  if git rev-parse --abbrev-ref "${branch}@{upstream}" >/dev/null 2>&1; then
+    git push || fail "git push 失败"
+  else
+    git push -u origin "$branch" || fail "git push -u 失败"
+  fi
+}
+
+ensure_pr_url() {
+  local base_branch="$1"
+  local pr_url=""
+
+  pr_url="$(gh pr view --json url --jq '.url' 2>/dev/null || true)"
+  if [ -n "$pr_url" ]; then
+    printf '%s\n' "$pr_url"
+    return 0
+  fi
+
+  log "未找到当前分支 PR，开始创建（base=$base_branch）"
+  gh pr create --fill --base "$base_branch" >/dev/null || fail "创建 PR 失败"
+
+  pr_url="$(gh pr view --json url --jq '.url' 2>/dev/null || true)"
+  [ -n "$pr_url" ] || fail "PR 创建后仍无法获取 URL"
+  printf '%s\n' "$pr_url"
+}
+
+post_review_comment() {
+  local comment_body="$1"
+  gh pr comment --body "$comment_body" >/dev/null || fail "PR 评论失败"
+}
+
+repo_slug_from_origin() {
+  local origin_url
+  local slug
+
+  origin_url="$(git remote get-url origin 2>/dev/null || true)"
+  [ -n "$origin_url" ] || return 1
+
+  case "$origin_url" in
+    git@github.com:*)
+      slug="${origin_url#git@github.com:}"
+      ;;
+    https://github.com/*)
+      slug="${origin_url#https://github.com/}"
+      ;;
+    http://github.com/*)
+      slug="${origin_url#http://github.com/}"
+      ;;
+    ssh://git@github.com/*)
+      slug="${origin_url#ssh://git@github.com/}"
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+
+  slug="${slug%.git}"
+  [ -n "$slug" ] || return 1
+  printf '%s\n' "$slug"
+}
+
+verify_visibility() {
+  local expected_visibility="$1"
+  local actual_visibility=""
+  local repo_url=""
+
+  REPO_SLUG="$(repo_slug_from_origin || true)"
+  [ -n "$REPO_SLUG" ] || fail "无法从 origin remote 解析 GitHub 仓库（仅支持 github.com）"
+
+  STEP_VISIBILITY_VERIFY="running"
+
+  actual_visibility="$(gh repo view "$REPO_SLUG" --json visibility --jq '.visibility' 2>/dev/null || true)"
+  repo_url="$(gh repo view "$REPO_SLUG" --json url --jq '.url' 2>/dev/null || true)"
+  [ -n "$actual_visibility" ] || fail "gh repo view 无法获取 visibility"
+
+  ACTUAL_VISIBILITY="$(printf '%s' "$actual_visibility" | tr '[:upper:]' '[:lower:]')"
+  REPO_URL="$repo_url"
+
+  if [ "$ACTUAL_VISIBILITY" = "$expected_visibility" ]; then
+    VISIBILITY_MATCH="true"
+    STEP_VISIBILITY_VERIFY="completed"
+    log "visibility verify 通过: expected=$expected_visibility actual=$ACTUAL_VISIBILITY"
+  else
+    VISIBILITY_MATCH="false"
+    STEP_VISIBILITY_VERIFY="failed"
+    fail "visibility 校验失败: expected=$expected_visibility, actual=$ACTUAL_VISIBILITY"
+  fi
+}
+
+publish_stage() {
+  require_publish_tools
+  ensure_gh_auth
+  ensure_origin_remote
+
+  STEP_PUBLISH="running"
+
+  if [ "$SKIP_FINALIZE" -eq 0 ]; then
+    log "执行 milestone-finalize（包含垃圾清理阶段）"
+    ./scripts/milestone-finalize || fail "milestone-finalize 执行失败"
+  else
+    log "按参数跳过 milestone-finalize"
+  fi
+
+  commit_if_needed "$COMMIT_MESSAGE"
+
+  log "推送分支: $BRANCH"
+  push_branch "$BRANCH"
+
+  PR_URL="$(ensure_pr_url "$BASE_BRANCH")"
+  log "PR: $PR_URL"
+
+  if [ "$SKIP_CODEX_REVIEW" -eq 0 ]; then
+    post_review_comment "$REVIEW_COMMENT"
+    log "已在 PR 发表评论: $REVIEW_COMMENT"
+  else
+    log "按参数跳过 PR 评论"
+  fi
+
+  STEP_PUBLISH="completed"
+}
+
+main() {
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --base)
+        [ "$#" -ge 2 ] || fail "--base 需要一个参数"
+        BASE_BRANCH="$2"
+        shift 2
+        ;;
+      --commit-message)
+        [ "$#" -ge 2 ] || fail "--commit-message 需要一个参数"
+        COMMIT_MESSAGE="$2"
+        shift 2
+        ;;
+      --review-comment)
+        [ "$#" -ge 2 ] || fail "--review-comment 需要一个参数"
+        REVIEW_COMMENT="$2"
+        shift 2
+        ;;
+      --visibility)
+        [ "$#" -ge 2 ] || fail "--visibility 需要一个参数"
+        REQUESTED_VISIBILITY="$2"
+        shift 2
+        ;;
+      --artifact-root)
+        [ "$#" -ge 2 ] || fail "--artifact-root 需要一个参数"
+        ARTIFACT_ROOT="$2"
+        shift 2
+        ;;
+      --skip-finalize)
+        SKIP_FINALIZE=1
+        shift
+        ;;
+      --skip-codex-review)
+        SKIP_CODEX_REVIEW=1
+        shift
+        ;;
+      --dry-run)
+        DRY_RUN=1
+        shift
+        ;;
+      -h|--help)
+        usage
+        exit 0
+        ;;
+      *)
+        fail "不支持的参数: $1"
+        ;;
+    esac
+  done
+
+  require_core_tools
+  ensure_git_repo
+
+  BRANCH="$(current_branch)"
+
+  create_run_dir
+  log "artifact run: $RUN_DIR"
+
+  prepare_scan_targets
+  run_sanitize
+  classify_visibility
+  resolve_expected_visibility
+
+  write_manifest_json
+  log "manifest: $MANIFEST_JSON"
+
+  if [ "$DRY_RUN" -eq 1 ]; then
+    STEP_PUBLISH="skipped"
+    STEP_VISIBILITY_VERIFY="skipped"
+    RESULT_STATUS="dry-run"
+    write_publish_results
+    log "dry-run 完成（仅执行 sanitize + classify）"
+    log "publish-results: $PUBLISH_RESULTS_JSON"
+    exit 0
+  fi
+
+  enforce_publish_policy
+  publish_stage
+  verify_visibility "$EXPECTED_VISIBILITY"
+
+  RESULT_STATUS="success"
+  write_publish_results
+
+  log "publish-results: $PUBLISH_RESULTS_JSON"
+  log "发布流程完成"
+}
+
+main "$@"

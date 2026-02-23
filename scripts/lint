@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# scripts/lint (python)
+# 说明：静态检查（ruff check）
+
+source .venv/bin/activate
+python -m ruff check .

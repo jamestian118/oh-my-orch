@@ -1,0 +1,139 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+AI_DIR="$PROJECT_ROOT/.ai"
+VERIFY_LOG="$AI_DIR/verify-log.json"
+LOGS_DIR="$AI_DIR/logs"
+
+usage() {
+  cat <<EOF
+Usage: $(basename "$0") [--tail N] [--since YYYY-MM-DD] [--grep PATTERN]
+  No args  : show latest verify result summary
+  --tail N : show last N lines from logs
+  --since  : filter log lines on or after date
+  --grep   : filter log lines matching pattern
+EOF
+}
+
+usage_error() {
+  echo "[query-logs] ERROR: $1" >&2
+  usage >&2
+  exit 2
+}
+
+validate_iso_date() {
+  local value="$1"
+  [[ "$value" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || return 1
+  python3 - "$value" <<'PY'
+import datetime
+import sys
+
+try:
+    datetime.date.fromisoformat(sys.argv[1])
+except ValueError:
+    raise SystemExit(1)
+PY
+}
+
+filter_since() {
+  local since="$1"
+  python3 -c '
+import datetime
+import re
+import sys
+
+since = datetime.date.fromisoformat(sys.argv[1])
+date_pattern = re.compile(r"(\d{4}-\d{2}-\d{2})")
+
+for line in sys.stdin:
+    match = date_pattern.search(line)
+    if not match:
+        continue
+    try:
+        found = datetime.date.fromisoformat(match.group(1))
+    except ValueError:
+        continue
+    if found >= since:
+        sys.stdout.write(line)
+' "$since"
+}
+
+# Default: show latest verify summary
+if [[ $# -eq 0 ]]; then
+  if [[ -f "$VERIFY_LOG" ]]; then
+    python3 -c "
+import json, sys
+with open('$VERIFY_LOG') as f: data = json.load(f)
+if isinstance(data, list): data = data[-1] if data else {}
+print(f\"Run ID    : {data.get('run_id','N/A')}\")
+print(f\"Timestamp : {data.get('timestamp','N/A')}\")
+print(f\"Overall   : {data.get('overall','N/A')}\")
+spans = data.get('spans', [])
+if spans:
+  print(f\"{'Step':<20} {'Status':<8} {'Duration (ms)':>14}\")
+  print('-'*44)
+  for s in spans:
+    print(f\"{s.get('step','?'):<20} {s.get('status','?'):<8} {s.get('duration_ms','?'):>14}\")
+"
+  else
+    echo "No verify-log.json found at $VERIFY_LOG"
+  fi
+  exit 0
+fi
+
+TAIL="" ; SINCE="" ; GREP=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --tail)
+      [[ $# -ge 2 ]] || usage_error "missing value for --tail"
+      TAIL="$2"
+      [[ "$TAIL" =~ ^[0-9]+$ ]] || usage_error "--tail must be a positive integer"
+      (( TAIL > 0 )) || usage_error "--tail must be a positive integer"
+      shift 2
+      ;;
+    --since)
+      [[ $# -ge 2 ]] || usage_error "missing value for --since"
+      SINCE="$2"
+      validate_iso_date "$SINCE" || usage_error "--since must be a valid date in YYYY-MM-DD"
+      shift 2
+      ;;
+    --grep)
+      [[ $# -ge 2 ]] || usage_error "missing value for --grep"
+      GREP="$2"
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      usage_error "unknown option: $1"
+      ;;
+  esac
+done
+
+# Collect log files
+LOG_FILES=()
+[[ -f "$VERIFY_LOG" ]] && LOG_FILES+=("$VERIFY_LOG")
+if [[ -d "$LOGS_DIR" ]]; then
+  while IFS= read -r f; do LOG_FILES+=("$f"); done < <(find "$LOGS_DIR" -type f | sort)
+fi
+
+if [[ ${#LOG_FILES[@]} -eq 0 ]]; then
+  echo "No log files found under $AI_DIR"
+  exit 0
+fi
+
+for f in "${LOG_FILES[@]}"; do
+  echo "=== $f ==="
+  content=$(cat "$f")
+  [[ -n "$SINCE" ]] && content=$(printf '%s\n' "$content" | filter_since "$SINCE")
+  [[ -n "$GREP" ]]  && content=$(printf '%s\n' "$content" | grep -E "$GREP" || true)
+  if [[ -n "$TAIL" ]]; then
+    printf '%s\n' "$content" | tail -n "$TAIL"
+  else
+    printf '%s\n' "$content"
+  fi
+done

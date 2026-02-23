@@ -1,0 +1,151 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+cd "$(dirname "$0")/.." || exit 1
+
+SCRIPT_NAME="milestone-finalize"
+
+log() {
+  echo "[$SCRIPT_NAME] $*"
+}
+
+fail() {
+  echo "[$SCRIPT_NAME] FAIL: $*" >&2
+  exit 1
+}
+
+usage() {
+  cat <<'USAGE'
+Usage:
+  ./scripts/milestone-finalize [--root <path>]... [--plan <path>] [--confirm <path>] [--expiry-seconds <sec>] [--approved-by <name>]
+
+Behavior:
+  1) Run ./scripts/verify
+  2) Run ./scripts/finalize-artifacts dry-run
+  3) If CI=true or non-TTY: print skip message and exit
+  4) If interactive TTY: ask user whether to cleanup; yes => confirm + apply
+USAGE
+}
+
+is_non_interactive() {
+  [ "${CI:-}" = "true" ] || [ "${CI:-}" = "1" ] || [ ! -t 0 ] || [ ! -t 1 ]
+}
+
+main() {
+  local plan_path=""
+  local confirm_path=""
+  local expiry_seconds="${FINALIZE_EXPIRY_SECONDS:-900}"
+  local approved_by="${FINALIZE_APPROVED_BY:-}"
+  local -a roots=()
+
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --root)
+        [ "$#" -ge 2 ] || fail "--root 需要一个参数"
+        roots+=("$2")
+        shift 2
+        ;;
+      --plan)
+        [ "$#" -ge 2 ] || fail "--plan 需要一个参数"
+        plan_path="$2"
+        shift 2
+        ;;
+      --confirm)
+        [ "$#" -ge 2 ] || fail "--confirm 需要一个参数"
+        confirm_path="$2"
+        shift 2
+        ;;
+      --expiry-seconds)
+        [ "$#" -ge 2 ] || fail "--expiry-seconds 需要一个参数"
+        expiry_seconds="$2"
+        shift 2
+        ;;
+      --approved-by)
+        [ "$#" -ge 2 ] || fail "--approved-by 需要一个参数"
+        approved_by="$2"
+        shift 2
+        ;;
+      -h|--help)
+        usage
+        exit 0
+        ;;
+      *)
+        fail "不支持的参数: $1"
+        ;;
+    esac
+  done
+
+  local -a dry_args=()
+  local -a confirm_args=()
+  local -a apply_args=()
+
+  if [ -n "$plan_path" ]; then
+    dry_args+=(--plan "$plan_path")
+    confirm_args+=(--plan "$plan_path")
+    apply_args+=(--plan "$plan_path")
+  fi
+  if [ -n "$confirm_path" ]; then
+    confirm_args+=(--confirm "$confirm_path")
+    apply_args+=(--confirm "$confirm_path")
+  fi
+  if [ -n "$expiry_seconds" ]; then
+    confirm_args+=(--expiry-seconds "$expiry_seconds")
+  fi
+  if [ -z "$approved_by" ]; then
+    approved_by="$(id -un 2>/dev/null || true)"
+  fi
+  if [ -n "$approved_by" ]; then
+    confirm_args+=(--approved-by "$approved_by")
+  fi
+  if [ "${#roots[@]}" -gt 0 ]; then
+    local root
+    for root in "${roots[@]}"; do
+      dry_args+=(--root "$root")
+    done
+  fi
+
+  log "运行 verify"
+  ./scripts/verify
+
+  log "生成 artifacts 清理计划（dry-run）"
+  ./scripts/finalize-artifacts dry-run "${dry_args[@]}"
+
+  if is_non_interactive; then
+    log "跳过交互清理（CI=true 或非TTY）"
+    exit 0
+  fi
+
+  local answer
+  read -r -p "[milestone-finalize] 是否执行 artifacts 清理？输入 yes 继续，其他任意键取消: " answer
+  case "$answer" in
+    yes|YES|y|Y)
+      log "生成 confirm"
+      ./scripts/finalize-artifacts confirm "${confirm_args[@]}"
+
+      local confirm_file token
+      confirm_file="${confirm_path:-${FINALIZE_CONFIRM_PATH:-.ai/finalize-artifacts.confirm.json}}"
+      token=$(python3 - "$confirm_file" <<'PY'
+import json
+import sys
+
+confirm_path = sys.argv[1]
+with open(confirm_path, "r", encoding="utf-8") as f:
+    data = json.load(f)
+
+token = data.get("token", "")
+if not token:
+    raise SystemExit("confirm.token 为空")
+print(token)
+PY
+) || fail "读取 confirm token 失败"
+
+      log "执行 apply"
+      ./scripts/finalize-artifacts apply "${apply_args[@]}" --token "$token"
+      ;;
+    *)
+      log "保留 artifacts，不执行清理"
+      ;;
+  esac
+}
+
+main "$@"

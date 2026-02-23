@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+set -uo pipefail
+
+# scripts/verify
+# 说明：最小验证命令（milestone/stop/切换 CLI 前必须跑）
+# 约定：汇总所有步骤结果后统一判定；输出尽量清晰
+# 可观测性：输出 JSON 日志到 .ai/verify-log.json
+
+if [ ! -f .harness ]; then
+  echo "[verify] FAIL: 缺少 .harness 标记文件，此项目未通过 universal-harness-kit 模板创建"
+  exit 1
+fi
+
+# 毫秒级时间戳（兼容 macOS/Linux）
+now_ms() { python3 -c 'import time; print(int(time.time()*1000))'; }
+
+run_id="verify-$(now_ms)"
+overall="pass"
+declare -a span_steps=()
+declare -a span_statuses=()
+declare -a span_durations=()
+
+run_step() {
+  local name="$1" cmd="$2"
+  echo "[verify] $name..."
+  local s_start s_end status
+  s_start=$(now_ms)
+  if eval "$cmd"; then
+    status="pass"
+  else
+    status="fail"
+    overall="fail"
+  fi
+  s_end=$(now_ms)
+  span_steps+=("$name")
+  span_statuses+=("$status")
+  span_durations+=("$(( s_end - s_start ))")
+}
+
+write_log() {
+  mkdir -p .ai
+  python3 -c "
+import json, datetime
+spans = []
+steps = '''$(IFS='|'; echo "${span_steps[*]:-}")'''.split('|')
+statuses = '''$(IFS='|'; echo "${span_statuses[*]:-}")'''.split('|')
+durations = '''$(IFS='|'; echo "${span_durations[*]:-}")'''.split('|')
+for s, st, d in zip(steps, statuses, durations):
+    spans.append({'step': s, 'status': st, 'duration_ms': int(d)})
+obj = {
+    'run_id': '$run_id',
+    'timestamp': datetime.datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ'),
+    'spans': spans,
+    'overall': '$overall'
+}
+with open('.ai/verify-log.json', 'w') as f:
+    json.dump(obj, f, indent=2)
+"
+}
+
+trap write_log EXIT
+
+run_step "format" "./scripts/format"
+run_step "lint" "./scripts/lint"
+run_step "test" "./scripts/test"
+run_step "arch-check" "./scripts/arch-check"
+run_step "docs-check" "./scripts/docs-check"
+run_step "secrets-check" "./scripts/secrets-check"
+run_step "gc" "./scripts/gc --strict"
+
+if [ "$overall" = "fail" ]; then
+  echo "[verify] FAIL"
+  exit 1
+fi
+
+echo "[verify] OK"

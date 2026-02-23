@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# pre-commit hook：commit 前自动跑 verify，不绿就拦住
+# 这是 Harness Engineering 的机械化 enforce 层
+
+echo "[pre-commit] 运行 scripts/verify..."
+./scripts/verify
+
+echo "[pre-commit] 通过"

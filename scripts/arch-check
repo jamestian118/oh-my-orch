@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# 架构检查：确保 src/ 中没有违规依赖 tests/ 的情况
+# 规则只拦截本地 tests 边界（./tests、../tests、/tests + Python import tests），避免 third-party 包名含 tests 误报。
+
+local_tests_path_re="(\\./tests(/[^'\\\"]*)?|\\.\\./tests(/[^'\\\"]*)?|/tests(/[^'\\\"]*)?)"
+
+violations=$(
+  {
+    # ESM/CommonJS：本地 tests 路径（./tests、../tests、/tests）
+    grep -rn -E "(import|from)[^\"']*[\"']${local_tests_path_re}[\"']" src/ 2>/dev/null || true
+    grep -rn -E "require[[:space:]]*\\([[:space:]]*['\"]${local_tests_path_re}['\"][[:space:]]*\\)" src/ 2>/dev/null || true
+    # Python：from tests import ... / import tests...
+    grep -rn -E '^[[:space:]]*from[[:space:]]+tests(\.[A-Za-z_][A-Za-z0-9_]*)?[[:space:]]+import[[:space:]]+' src/ 2>/dev/null || true
+    grep -rn -E '^[[:space:]]*import[[:space:]]+([^#]*,[[:space:]]*)?tests(\.[A-Za-z_][A-Za-z0-9_]*)?([[:space:]]+as[[:space:]]+[A-Za-z_][A-Za-z0-9_]*)?([[:space:]]*(,|$))' src/ 2>/dev/null || true
+  } | sed '/^$/d' | sort -u
+)
+
+if [ -n "$violations" ]; then
+  echo "[arch-check] FAIL: src/ 中发现违规依赖 tests/："
+  echo "$violations"
+  exit 1
+fi
+
+# --- 层级依赖方向检查 ---
+# Layer hierarchy (low to high): types config clients services runtime ui cmd
+layers=("types" "config" "clients" "services" "runtime" "ui" "cmd")
+
+layer_violations=""
+
+for i in "${!layers[@]}"; do
+  layer="${layers[$i]}"
+  layer_dir="src/${layer}"
+  [ -d "$layer_dir" ] || continue
+
+  # Build forbidden pattern: same layer + all higher layers
+  forbidden=()
+  for j in "${!layers[@]}"; do
+    if [ "$j" -ge "$i" ] && [ "${layers[$j]}" != "$layer" ]; then
+      forbidden+=("${layers[$j]}")
+    fi
+    # Same layer self-import is also forbidden (circular)
+    if [ "$j" -eq "$i" ]; then
+      forbidden+=("${layer}")
+    fi
+  done
+
+  for target in "${forbidden[@]}"; do
+    hits=$(
+      {
+        # Path-based imports: ./services, ../services, /services
+        grep -rn -E "(import|from|require)[^\"']*[\"'][^\"']*(/${target}/|/${target}[\"'])" "$layer_dir" 2>/dev/null || true
+        # Python module imports: from services.x import / import services
+        grep -rn -E "^[[:space:]]*(from|import)[[:space:]]+${target}(\\.|[[:space:]])" "$layer_dir" 2>/dev/null || true
+        # Go imports: "project/services"
+        grep -rn -E "\"[^\"]*/${target}(\/[^\"]*)?\"" "$layer_dir" 2>/dev/null || true
+      } | sed '/^$/d' | sort -u
+    )
+    if [ -n "$hits" ]; then
+      layer_violations="${layer_violations}
+[${layer} -> ${target}] 违规:
+${hits}"
+    fi
+  done
+done
+
+if [ -n "$layer_violations" ]; then
+  echo "[arch-check] FAIL: src/ 层级依赖方向违规："
+  echo "$layer_violations"
+  exit 1
+fi
+
+echo "[arch-check] OK"

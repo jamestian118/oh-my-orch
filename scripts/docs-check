@@ -1,0 +1,101 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+failures=0
+
+error() {
+  echo "[docs-check] ERROR: $*" >&2
+  failures=1
+}
+
+require_file() {
+  local path="$1"
+  if [[ ! -f "$path" ]]; then
+    error "missing file: $path"
+  fi
+}
+
+check_bilingual_headers() {
+  local file="$1"
+  local label="$2"
+  if ! grep -Eq '^[[:space:]]*##[[:space:]]*中文([[:space:]]|（|\(|$)' "$file"; then
+    error "$label missing Chinese header (## 中文...)"
+  fi
+  if ! grep -Eq '^[[:space:]]*##[[:space:]]*English([[:space:]]|（|\(|$)' "$file"; then
+    error "$label missing English header (## English...)"
+  fi
+}
+
+check_usage_section_pair() {
+  local file="$1"
+  local section_label="$2"
+  local pattern="$3"
+  local count
+  count=$(grep -Eci "$pattern" "$file" || true)
+  if (( count < 2 )); then
+    error "$file missing bilingual section '$section_label' (expected >=2 headings, got $count)"
+  fi
+}
+
+check_usage_doc() {
+  local file="$1"
+  check_bilingual_headers "$file" "$file"
+  check_usage_section_pair "$file" "prerequisites" '^[[:space:]]*###[[:space:]]*([0-9]+\)[[:space:]]*)?(prerequisites|prereqs)\b'
+  check_usage_section_pair "$file" "setup" '^[[:space:]]*###[[:space:]]*([0-9]+\)[[:space:]]*)?setup\b'
+  check_usage_section_pair "$file" "commands" '^[[:space:]]*###[[:space:]]*([0-9]+\)[[:space:]]*)?(exact commands|run commands)\b'
+  check_usage_section_pair "$file" "examples" '^[[:space:]]*###[[:space:]]*([0-9]+\)[[:space:]]*)?examples\b'
+  check_usage_section_pair "$file" "I/O" '^[[:space:]]*###[[:space:]]*([0-9]+\)[[:space:]]*)?(I/O|Input/Output)\b'
+  check_usage_section_pair "$file" "flags/options" '^[[:space:]]*###[[:space:]]*([0-9]+\)[[:space:]]*)?(flags|flags/options|options)\b'
+  check_usage_section_pair "$file" "troubleshooting" '^[[:space:]]*###[[:space:]]*([0-9]+\)[[:space:]]*)?troubleshooting\b'
+}
+
+# scripts/docs-check
+# Ensures the system-of-record docs are present and conform to basic policy.
+
+require_file "README.md"
+require_file "docs/index.md"
+require_file "docs/architecture.md"
+require_file "docs/security.md"
+require_file "docs/quality.md"
+require_file "docs/docs-policy.md"
+require_file "docs/scripts.md"
+require_file "docs/reliability.md"
+
+while IFS= read -r candidate; do
+  [[ -n "$candidate" ]] || continue
+  if [[ "$candidate" != "./README.md" ]]; then
+    error "non-standard README variant found: ${candidate#./} (rename to README.md)"
+  fi
+done < <(find . -maxdepth 1 -type f \( -iname 'readme' -o -iname 'readme.*' \) | sort)
+
+if [[ -f "README.md" ]]; then
+  check_bilingual_headers "README.md" "README.md"
+fi
+if [[ -f "docs/scripts.md" ]]; then
+  check_bilingual_headers "docs/scripts.md" "docs/scripts.md"
+fi
+
+# 检查 scripts/ 下每个可执行脚本是否在 docs/scripts.md 中有记录
+for f in scripts/*; do
+  [ -x "$f" ] || continue
+  name=$(basename "$f")
+  if ! grep -F -x -q "### $name" docs/scripts.md; then
+    error "script '$name' not documented in docs/scripts.md"
+  fi
+done
+
+usage_docs=(docs/*.usage.zh-en.md)
+if [[ ${#usage_docs[@]} -eq 1 && "${usage_docs[0]}" == "docs/*.usage.zh-en.md" ]]; then
+  error "no usage docs found matching docs/*.usage.zh-en.md"
+else
+  for doc in "${usage_docs[@]}"; do
+    [[ -f "$doc" ]] || continue
+    check_usage_doc "$doc"
+  done
+fi
+
+if (( failures != 0 )); then
+  exit 1
+fi
+
+echo "[docs-check] OK"

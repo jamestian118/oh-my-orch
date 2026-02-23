@@ -1,0 +1,37 @@
+{
+  "run_id": "verify-1771730720299",
+  "timestamp": "2026-02-22T03:25:21Z",
+  "spans": [
+    {
+      "step": "format",
+      "status": "fail",
+      "duration_ms": 23
+    },
+    {
+      "step": "lint",
+      "status": "fail",
+      "duration_ms": 22
+    },
+    {
+      "step": "test",
+      "status": "fail",
+      "duration_ms": 22
+    },
+    {
+      "step": "arch-check",
+      "status": "pass",
+      "duration_ms": 398
+    },
+    {
+      "step": "docs-check",
+      "status": "pass",
+      "duration_ms": 75
+    },
+    {
+      "step": "secrets-check",
+      "status": "pass",
+      "duration_ms": 51
+    }
+  ],
+  "overall": "fail"
+}

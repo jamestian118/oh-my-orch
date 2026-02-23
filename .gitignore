@@ -1,0 +1,28 @@
+# Python/Node/Go/Generic common ignores
+.DS_Store
+.idea/
+.vscode/
+.env
+.env.*
+!.env.example
+
+# Build artifacts
+dist/
+build/
+coverage/
+.artifacts/
+test-results/
+
+# Ephemeral automation scripts
+scripts/.tmp/
+.ai/tmp-scripts/
+
+# Local caches
+.cache/
+.pytest_cache/
+.mypy_cache/
+ruff_cache/
+
+# Python venv
+.venv/
+venv/

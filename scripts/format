@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# scripts/format (python)
+# 说明：代码格式化（ruff format）
+
+source .venv/bin/activate
+python -m ruff format .

@@ -1,0 +1,632 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+cd "$(dirname "$0")/.." || exit 1
+
+SCRIPT_NAME="finalize-artifacts"
+DEFAULT_PLAN=".ai/finalize-artifacts.plan.json"
+DEFAULT_CONFIRM=".ai/finalize-artifacts.confirm.json"
+DEFAULT_LAST=".ai/finalize-artifacts.last.json"
+DEFAULT_VERIFY_CMD="./scripts/verify"
+DEFAULT_EXPIRY_SECONDS=900
+DEFAULT_ROOTS=(".artifacts" "test-results" "scripts/.tmp" ".ai/tmp-scripts")
+
+log() {
+  echo "[$SCRIPT_NAME] $*"
+}
+
+fail() {
+  echo "[$SCRIPT_NAME] FAIL: $*" >&2
+  exit 1
+}
+
+usage() {
+  cat <<'USAGE'
+Usage:
+  ./scripts/finalize-artifacts dry-run [--root <path>]... [--plan <path>]
+  ./scripts/finalize-artifacts confirm [--plan <path>] [--confirm <path>] [--approved-by <name>] [--expiry-seconds <sec>] [--token <token>]
+  ./scripts/finalize-artifacts apply --token <token> [--plan <path>] [--confirm <path>] [--last <path>] [--verify-cmd <cmd>]
+
+Subcommands:
+  dry-run   Generate a deletion plan only (no deletion)
+  confirm   Generate a confirmation file for a plan
+  apply     Verify + validate confirmation + delete planned candidates
+USAGE
+}
+
+require_tools() {
+  command -v python3 >/dev/null 2>&1 || fail "python3 未安装"
+  command -v git >/dev/null 2>&1 || fail "git 未安装"
+}
+
+validate_rel_path() {
+  local p="$1"
+  [ -n "$p" ] || fail "路径不能为空"
+  case "$p" in
+    .|./)
+      fail "不允许使用 '.' 作为路径"
+      ;;
+    /*)
+      fail "路径必须是仓库内相对路径: $p"
+      ;;
+    ..|../*|*/..|*/../*)
+      fail "路径不能包含父目录跳转: $p"
+      ;;
+  esac
+}
+
+is_under_roots() {
+  local path="$1"
+  shift
+  local root
+  for root in "$@"; do
+    case "$path" in
+      "$root"|"$root"/*)
+        return 0
+        ;;
+    esac
+  done
+  return 1
+}
+
+compute_plan_hash() {
+  local plan_path="$1"
+  python3 - "$plan_path" <<'PY'
+import hashlib
+import json
+import sys
+
+plan_path = sys.argv[1]
+with open(plan_path, "r", encoding="utf-8") as f:
+    plan = json.load(f)
+
+required = ("schema", "generated_at", "roots", "candidates")
+missing = [k for k in required if k not in plan]
+if missing:
+    raise SystemExit(f"plan 缺少字段: {','.join(missing)}")
+
+payload = {k: plan[k] for k in required}
+h = hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+print(h)
+PY
+}
+
+write_plan() {
+  local plan_path="$1"
+  local roots_file="$2"
+  local candidates_file="$3"
+
+  python3 - "$plan_path" "$roots_file" "$candidates_file" <<'PY'
+import datetime
+import hashlib
+import json
+import os
+import sys
+
+plan_path, roots_file, candidates_file = sys.argv[1:]
+
+with open(roots_file, "r", encoding="utf-8") as f:
+    roots = [line.rstrip("\n") for line in f if line.strip()]
+with open(candidates_file, "r", encoding="utf-8") as f:
+    candidates = [line.rstrip("\n") for line in f if line.strip()]
+
+roots = list(dict.fromkeys(roots))
+candidates = sorted(set(candidates))
+
+generated_at = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+payload = {
+    "schema": "finalize-artifacts/v1",
+    "generated_at": generated_at,
+    "roots": roots,
+    "candidates": candidates,
+}
+plan_hash = hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+plan = dict(payload)
+plan["plan_hash"] = plan_hash
+
+parent = os.path.dirname(plan_path)
+if parent:
+    os.makedirs(parent, exist_ok=True)
+with open(plan_path, "w", encoding="utf-8") as f:
+    json.dump(plan, f, ensure_ascii=False, indent=2)
+    f.write("\n")
+
+print(f"{plan_hash}\t{len(candidates)}")
+PY
+}
+
+extract_plan_lists() {
+  local plan_path="$1"
+  local roots_out="$2"
+  local candidates_out="$3"
+  local stored_hash_out="$4"
+
+  python3 - "$plan_path" "$roots_out" "$candidates_out" "$stored_hash_out" <<'PY'
+import json
+import sys
+
+plan_path, roots_out, candidates_out, stored_hash_out = sys.argv[1:]
+with open(plan_path, "r", encoding="utf-8") as f:
+    plan = json.load(f)
+
+for key in ("schema", "generated_at", "roots", "candidates"):
+    if key not in plan:
+        raise SystemExit(f"plan 缺少字段: {key}")
+
+roots = plan["roots"]
+candidates = plan["candidates"]
+if not isinstance(roots, list) or not all(isinstance(x, str) for x in roots):
+    raise SystemExit("plan.roots 必须是字符串数组")
+if not isinstance(candidates, list) or not all(isinstance(x, str) for x in candidates):
+    raise SystemExit("plan.candidates 必须是字符串数组")
+
+with open(roots_out, "w", encoding="utf-8") as f:
+    for item in roots:
+        if item:
+            f.write(item + "\n")
+with open(candidates_out, "w", encoding="utf-8") as f:
+    for item in candidates:
+        if item:
+            f.write(item + "\n")
+with open(stored_hash_out, "w", encoding="utf-8") as f:
+    f.write(str(plan.get("plan_hash", "")))
+PY
+}
+
+write_confirm_file() {
+  local confirm_path="$1"
+  local plan_hash="$2"
+  local approved_by="$3"
+  local expires_epoch="$4"
+  local token="$5"
+
+  python3 - "$confirm_path" "$plan_hash" "$approved_by" "$expires_epoch" "$token" <<'PY'
+import datetime
+import json
+import os
+import sys
+import time
+
+confirm_path, plan_hash, approved_by, expires_epoch_raw, token = sys.argv[1:]
+expires_epoch = int(expires_epoch_raw)
+created_epoch = int(time.time())
+
+confirm = {
+    "schema": "finalize-artifacts-confirm/v1",
+    "created_at": datetime.datetime.fromtimestamp(created_epoch, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    "created_at_epoch": created_epoch,
+    "approved_by": approved_by,
+    "expires_at": datetime.datetime.fromtimestamp(expires_epoch, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    "expires_at_epoch": expires_epoch,
+    "plan_hash": plan_hash,
+    "token": token,
+}
+
+parent = os.path.dirname(confirm_path)
+if parent:
+    os.makedirs(parent, exist_ok=True)
+with open(confirm_path, "w", encoding="utf-8") as f:
+    json.dump(confirm, f, ensure_ascii=False, indent=2)
+    f.write("\n")
+PY
+}
+
+read_confirm_fields() {
+  local confirm_path="$1"
+  python3 - "$confirm_path" <<'PY'
+import json
+import sys
+
+confirm_path = sys.argv[1]
+with open(confirm_path, "r", encoding="utf-8") as f:
+    confirm = json.load(f)
+
+required = ["plan_hash", "expires_at_epoch", "token", "approved_by"]
+missing = [k for k in required if k not in confirm]
+if missing:
+    raise SystemExit(f"confirm 缺少字段: {','.join(missing)}")
+
+print("\t".join(str(confirm[k]) for k in required))
+PY
+}
+
+write_last_file() {
+  local last_path="$1"
+  local plan_path="$2"
+  local confirm_path="$3"
+  local plan_hash="$4"
+  local approved_by="$5"
+  local verify_cmd="$6"
+  local deleted_file="$7"
+
+  python3 - "$last_path" "$plan_path" "$confirm_path" "$plan_hash" "$approved_by" "$verify_cmd" "$deleted_file" <<'PY'
+import datetime
+import json
+import os
+import sys
+
+last_path, plan_path, confirm_path, plan_hash, approved_by, verify_cmd, deleted_file = sys.argv[1:]
+with open(deleted_file, "r", encoding="utf-8") as f:
+    deleted = [line.rstrip("\n") for line in f if line.strip()]
+
+doc = {
+    "schema": "finalize-artifacts-apply/v1",
+    "applied_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    "plan_file": plan_path,
+    "confirm_file": confirm_path,
+    "plan_hash": plan_hash,
+    "approved_by": approved_by,
+    "verify_cmd": verify_cmd,
+    "deleted": deleted,
+    "deleted_count": len(deleted),
+    "status": "applied",
+}
+
+parent = os.path.dirname(last_path)
+if parent:
+    os.makedirs(parent, exist_ok=True)
+with open(last_path, "w", encoding="utf-8") as f:
+    json.dump(doc, f, ensure_ascii=False, indent=2)
+    f.write("\n")
+PY
+}
+
+cmd_dry_run() {
+  local plan_path="$DEFAULT_PLAN"
+  local custom_roots=0
+  local -a roots=("${DEFAULT_ROOTS[@]}")
+
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --root)
+        [ "$#" -ge 2 ] || fail "--root 需要一个参数"
+        if [ "$custom_roots" -eq 0 ]; then
+          roots=()
+          custom_roots=1
+        fi
+        roots+=("$2")
+        shift 2
+        ;;
+      --plan)
+        [ "$#" -ge 2 ] || fail "--plan 需要一个参数"
+        plan_path="$2"
+        shift 2
+        ;;
+      -h|--help)
+        usage
+        exit 0
+        ;;
+      *)
+        fail "dry-run 不支持的参数: $1"
+        ;;
+    esac
+  done
+
+  [ "${#roots[@]}" -gt 0 ] || fail "至少需要一个 root"
+  validate_rel_path "$plan_path"
+
+  local tmpdir
+  tmpdir=$(mktemp -d "${TMPDIR:-/tmp}/finalize-artifacts.XXXXXX")
+  trap 'rm -rf -- '"'"$tmpdir"'"'' RETURN
+
+  local roots_file="$tmpdir/roots.txt"
+  local candidates_tmp="$tmpdir/candidates.tmp"
+  local candidates_file="$tmpdir/candidates.txt"
+
+  : > "$roots_file"
+  for root in "${roots[@]}"; do
+    validate_rel_path "$root"
+    printf '%s\n' "$root" >> "$roots_file"
+  done
+  awk 'NF && !seen[$0]++' "$roots_file" > "$tmpdir/roots.unique"
+  mv "$tmpdir/roots.unique" "$roots_file"
+
+  : > "$candidates_tmp"
+  while IFS= read -r root; do
+    [ -n "$root" ] || continue
+    [ -e "$root" ] || continue
+
+    while IFS= read -r path; do
+      [ -n "$path" ] || continue
+      validate_rel_path "$path"
+      if git check-ignore -q -- "$path"; then
+        printf '%s\n' "$path" >> "$candidates_tmp"
+      fi
+    done < <(find "$root" -mindepth 1 -print | LC_ALL=C sort)
+  done < "$roots_file"
+
+  if [ -s "$candidates_tmp" ]; then
+    LC_ALL=C sort -u "$candidates_tmp" > "$candidates_file"
+  else
+    : > "$candidates_file"
+  fi
+
+  local plan_result plan_hash candidate_count
+  plan_result=$(write_plan "$plan_path" "$roots_file" "$candidates_file") || fail "生成 plan 失败"
+  plan_hash="${plan_result%%$'\t'*}"
+  candidate_count="${plan_result##*$'\t'}"
+
+  log "dry-run 完成"
+  log "plan: $plan_path"
+  log "plan hash: $plan_hash"
+  log "候选数量: $candidate_count"
+
+  if [ "$candidate_count" -eq 0 ]; then
+    log "候选清单为空（无可清理对象）"
+    return 0
+  fi
+
+  log "候选清单："
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    printf ' - %s\n' "$path"
+  done < "$candidates_file"
+}
+
+cmd_confirm() {
+  local plan_path="$DEFAULT_PLAN"
+  local confirm_path="$DEFAULT_CONFIRM"
+  local approved_by=""
+  local expiry_seconds="$DEFAULT_EXPIRY_SECONDS"
+  local token=""
+
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --plan)
+        [ "$#" -ge 2 ] || fail "--plan 需要一个参数"
+        plan_path="$2"
+        shift 2
+        ;;
+      --confirm)
+        [ "$#" -ge 2 ] || fail "--confirm 需要一个参数"
+        confirm_path="$2"
+        shift 2
+        ;;
+      --approved-by)
+        [ "$#" -ge 2 ] || fail "--approved-by 需要一个参数"
+        approved_by="$2"
+        shift 2
+        ;;
+      --expiry-seconds)
+        [ "$#" -ge 2 ] || fail "--expiry-seconds 需要一个参数"
+        expiry_seconds="$2"
+        shift 2
+        ;;
+      --token)
+        [ "$#" -ge 2 ] || fail "--token 需要一个参数"
+        token="$2"
+        shift 2
+        ;;
+      -h|--help)
+        usage
+        exit 0
+        ;;
+      *)
+        fail "confirm 不支持的参数: $1"
+        ;;
+    esac
+  done
+
+  validate_rel_path "$plan_path"
+  validate_rel_path "$confirm_path"
+  [ -f "$plan_path" ] || fail "plan 不存在: $plan_path"
+
+  if [ -z "$approved_by" ]; then
+    approved_by="$(id -un 2>/dev/null || true)"
+  fi
+  [ -n "$approved_by" ] || fail "approved_by 不能为空"
+
+  case "$expiry_seconds" in
+    ''|*[!0-9]*)
+      fail "expiry-seconds 必须是正整数"
+      ;;
+  esac
+  [ "$expiry_seconds" -gt 0 ] || fail "expiry-seconds 必须大于 0"
+
+  if [ -z "$token" ]; then
+    token=$(python3 - <<'PY'
+import secrets
+print(secrets.token_urlsafe(18))
+PY
+)
+  fi
+  [ -n "$token" ] || fail "token 不能为空"
+
+  local plan_hash now_epoch expires_epoch
+  plan_hash=$(compute_plan_hash "$plan_path") || fail "计算 plan hash 失败"
+  now_epoch=$(date +%s)
+  expires_epoch=$((now_epoch + expiry_seconds))
+
+  write_confirm_file "$confirm_path" "$plan_hash" "$approved_by" "$expires_epoch" "$token" || fail "写入 confirm 文件失败"
+
+  log "confirm 已生成: $confirm_path"
+  log "plan hash: $plan_hash"
+  log "approved_by: $approved_by"
+  log "token: $token"
+}
+
+cmd_apply() {
+  local plan_path="$DEFAULT_PLAN"
+  local confirm_path="$DEFAULT_CONFIRM"
+  local last_path="$DEFAULT_LAST"
+  local verify_cmd="$DEFAULT_VERIFY_CMD"
+  local provided_token=""
+
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --plan)
+        [ "$#" -ge 2 ] || fail "--plan 需要一个参数"
+        plan_path="$2"
+        shift 2
+        ;;
+      --confirm)
+        [ "$#" -ge 2 ] || fail "--confirm 需要一个参数"
+        confirm_path="$2"
+        shift 2
+        ;;
+      --last)
+        [ "$#" -ge 2 ] || fail "--last 需要一个参数"
+        last_path="$2"
+        shift 2
+        ;;
+      --verify-cmd)
+        [ "$#" -ge 2 ] || fail "--verify-cmd 需要一个参数"
+        verify_cmd="$2"
+        shift 2
+        ;;
+      --token)
+        [ "$#" -ge 2 ] || fail "--token 需要一个参数"
+        provided_token="$2"
+        shift 2
+        ;;
+      -h|--help)
+        usage
+        exit 0
+        ;;
+      *)
+        fail "apply 不支持的参数: $1"
+        ;;
+    esac
+  done
+
+  [ -n "$provided_token" ] || fail "apply 必须提供 --token"
+  validate_rel_path "$plan_path"
+  validate_rel_path "$confirm_path"
+  validate_rel_path "$last_path"
+  [ -f "$plan_path" ] || fail "plan 不存在: $plan_path"
+  [ -f "$confirm_path" ] || fail "confirm 不存在: $confirm_path"
+
+  log "执行 verify: $verify_cmd"
+  if ! eval "$verify_cmd"; then
+    fail "verify 失败，停止删除"
+  fi
+
+  local actual_plan_hash
+  actual_plan_hash=$(compute_plan_hash "$plan_path") || fail "计算 plan hash 失败"
+
+  local tmpdir
+  tmpdir=$(mktemp -d "${TMPDIR:-/tmp}/finalize-artifacts.XXXXXX")
+  trap 'rm -rf -- '"'"$tmpdir"'"'' RETURN
+
+  local roots_file="$tmpdir/roots.txt"
+  local candidates_file="$tmpdir/candidates.txt"
+  local stored_hash_file="$tmpdir/stored-hash.txt"
+  extract_plan_lists "$plan_path" "$roots_file" "$candidates_file" "$stored_hash_file" || fail "解析 plan 失败"
+
+  local stored_plan_hash
+  stored_plan_hash=$(cat "$stored_hash_file")
+  if [ -n "$stored_plan_hash" ] && [ "$stored_plan_hash" != "$actual_plan_hash" ]; then
+    fail "plan hash 字段与内容不一致"
+  fi
+
+  local confirm_raw confirm_plan_hash confirm_expiry confirm_token approved_by
+  confirm_raw=$(read_confirm_fields "$confirm_path") || fail "解析 confirm 失败"
+  IFS=$'\t' read -r confirm_plan_hash confirm_expiry confirm_token approved_by <<< "$confirm_raw"
+
+  [ -n "$confirm_plan_hash" ] || fail "confirm 缺少 plan_hash"
+  [ -n "$confirm_expiry" ] || fail "confirm 缺少 expires_at_epoch"
+  [ -n "$confirm_token" ] || fail "confirm 缺少 token"
+
+  if [ "$confirm_plan_hash" != "$actual_plan_hash" ]; then
+    fail "confirm.plan_hash 与当前 plan 不匹配"
+  fi
+
+  case "$confirm_expiry" in
+    ''|*[!0-9]*)
+      fail "confirm.expires_at_epoch 非法"
+      ;;
+  esac
+  local now_epoch
+  now_epoch=$(date +%s)
+  if [ "$now_epoch" -gt "$confirm_expiry" ]; then
+    fail "confirm 已过期"
+  fi
+
+  if [ "$provided_token" != "$confirm_token" ]; then
+    fail "token 校验失败"
+  fi
+
+  local -a roots=()
+  local -a candidates=()
+  while IFS= read -r root; do
+    [ -n "$root" ] || continue
+    roots+=("$root")
+  done < "$roots_file"
+  while IFS= read -r candidate; do
+    [ -n "$candidate" ] || continue
+    candidates+=("$candidate")
+  done < "$candidates_file"
+
+  [ "${#roots[@]}" -gt 0 ] || fail "plan.roots 为空"
+
+  local root
+  for root in "${roots[@]}"; do
+    validate_rel_path "$root"
+  done
+
+  local candidate
+  for candidate in "${candidates[@]}"; do
+    validate_rel_path "$candidate"
+    is_under_roots "$candidate" "${roots[@]}" || fail "候选不在 roots 下: $candidate"
+    [ -e "$candidate" ] || fail "候选不存在（plan 已过期）: $candidate"
+    git check-ignore -q -- "$candidate" || fail "候选不是 git ignored: $candidate"
+  done
+
+  local -a delete_order=()
+  if [ "${#candidates[@]}" -gt 0 ]; then
+    while IFS= read -r candidate; do
+      [ -n "$candidate" ] || continue
+      delete_order+=("$candidate")
+    done < <(printf '%s\n' "${candidates[@]}" | awk '{print length($0) "\t" $0}' | sort -rn | cut -f2-)
+  fi
+
+  local deleted_file="$tmpdir/deleted.txt"
+  : > "$deleted_file"
+
+  local deleted_count=0
+  for candidate in "${delete_order[@]}"; do
+    [ -e "$candidate" ] || fail "删除前候选消失，终止执行: $candidate"
+    rm -rf -- "$candidate"
+    printf '%s\n' "$candidate" >> "$deleted_file"
+    deleted_count=$((deleted_count + 1))
+  done
+
+  write_last_file "$last_path" "$plan_path" "$confirm_path" "$actual_plan_hash" "$approved_by" "$verify_cmd" "$deleted_file" || fail "写入 last 记录失败"
+
+  log "apply 完成"
+  log "删除数量: $deleted_count"
+  log "last: $last_path"
+}
+
+main() {
+  require_tools
+
+  [ "$#" -gt 0 ] || {
+    usage
+    exit 1
+  }
+
+  case "$1" in
+    dry-run)
+      shift
+      cmd_dry_run "$@"
+      ;;
+    confirm)
+      shift
+      cmd_confirm "$@"
+      ;;
+    apply)
+      shift
+      cmd_apply "$@"
+      ;;
+    -h|--help|help)
+      usage
+      ;;
+    *)
+      fail "未知子命令: $1"
+      ;;
+  esac
+}
+
+main "$@"
