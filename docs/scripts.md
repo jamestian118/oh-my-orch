@@ -34,14 +34,17 @@
 ```
 
 ### I/O
-- 输入：通常为命令行参数（dev 脚本会透传参数，若实现）
+- 输入：通常为命令行参数（`./scripts/dev` 会原样透传 `"$@"` 给 `python omo.py`）
 - 输出：stdout/stderr；失败返回非 0
 
 ### flags
 - 无统一 flags；若后续为某脚本新增 flags，必须同步更新本文档（中英双语）
 
 ### dev
-- 启动本地开发环境
+- 启动本地开发入口（`omo.py`）
+- 实际执行顺序：
+  - `source .venv/bin/activate`
+  - `python omo.py "$@"`
 
 ### format
 - 格式化代码
@@ -53,7 +56,10 @@
 - 运行测试套件
 
 ### verify
-- 最小验证入口，顺序执行格式化、代码检查、测试、自检与 gc(--strict)
+- 最小验证入口；先校验 `.harness` 存在，不存在则立即失败
+- 顺序执行并汇总状态：`format -> lint -> test -> arch-check -> docs-check -> secrets-check -> gc --strict`
+- 即使某一步失败，仍会继续后续步骤并在退出时写入 `.ai/verify-log.json`（含 `run_id/spans/overall`）
+- 最终输出：全部通过打印 `[verify] OK`；任一步失败打印 `[verify] FAIL` 并以非 0 退出
 
 ### finalize-artifacts
 ```bash
@@ -172,14 +178,17 @@
 ```
 
 ### I/O
-- Input: usually CLI args (dev may forward args if implemented)
+- Input: usually CLI args (`./scripts/dev` forwards `"$@"` to `python omo.py` as-is)
 - Output: stdout/stderr; non-zero exit on failure
 
 ### flags
 - No unified flags. If any script gains flags, this doc must be updated (bilingual).
 
 ### dev
-- Starts the local development environment
+- Starts the local development entrypoint (`omo.py`)
+- Runtime sequence:
+  - `source .venv/bin/activate`
+  - `python omo.py "$@"`
 
 ### format
 - Formats the codebase
@@ -191,7 +200,10 @@
 - Runs the test suite
 
 ### verify
-- Minimal verification entrypoint, sequentially runs format, lint, test, self-checks, and gc (--strict)
+- Minimal verification entrypoint; first checks `.harness`, and fails immediately if missing
+- Runs and aggregates the exact sequence: `format -> lint -> test -> arch-check -> docs-check -> secrets-check -> gc --strict`
+- Even if one stage fails, it still executes remaining stages and writes `.ai/verify-log.json` on exit (`run_id/spans/overall`)
+- Final output: prints `[verify] OK` when all pass; prints `[verify] FAIL` and exits non-zero if any stage fails
 
 ### finalize-artifacts
 ```bash
