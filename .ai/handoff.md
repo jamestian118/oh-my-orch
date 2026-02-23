@@ -3,6 +3,30 @@
 > 规则：动态进度只写在这里；不要把动态内容写进 docs/ 或长期规范文件。
 
 ## 最新交接（追加在最上方）
+- Date：2026-02-24 00:38:26 (Asia/Shanghai)
+- Branch：ai/20260223-omo-step1-6
+- Commit：3f56f0f
+- git status（摘要）：`M lib/orchestrator_team.py`、`?? tests/test_team_arbiter_flow.py`、`M README.md`、`M docs/architecture.md`、`M .ai/verify-log.json`
+- 最小验证命令：`./scripts/verify`
+- 关键输出摘录（key output excerpts）：
+  - `./scripts/verify -> [verify] OK`
+  - `pytest -> 36 passed in 32.55s`
+  - `team arbiter decisions 落盘: context-pack.json/codex.json/gemini.json/arbiter.json(+ask.json when ask=true)`
+
+### Done
+- 已提交上一阶段并行成果：`3f56f0f feat(orchestrator): add run registry dual-write and arbiter skeleton`。
+- 下一阶段并行推进完成：`decision_arbiter` 接入 team 主流程并返回 `arbiter` 字段。
+- 新增 team arbiter 回归测试：`tests/test_team_arbiter_flow.py`（默认 soft 兼容 + strict gate 阻断）。
+- 文档契约同步：`README.md`、`docs/architecture.md` 更新 decisions artifacts 与 gate 语义。
+- 主线程收口完成：统一 gate 模式 `off|soft|strict`（兼容 `1/true` 视为 `strict`），并修正文档中的 `context-pack.json` 命名。
+
+### Next Steps（3-8 条，按优先级）
+1. 提交本阶段改动（team arbiter integration + tests + docs）。
+2. 评估是否把 `arbiter.ask=true` 的失败信息进一步映射到 machine-readable `exit_code`。
+3. 若要全链路一致，可在 `pipeline` 补同构 decisions artifacts（与 team 对齐）。
+4. 视需要把 `strict` gate 扩展为 CLI flag（避免仅靠 env var）。
+
+## 上一交接（2026-02-24 00:24:47）
 - Date：2026-02-24 00:24:47 (Asia/Shanghai)
 - Branch：ai/20260223-omo-step1-6
 - Commit：f7aa258

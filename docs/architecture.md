@@ -60,13 +60,15 @@ Enforced by `./scripts/arch-check`.
 - Local: ./scripts/verify
 - CI: .github/workflows/verify.yml
 
-## Decision Arbiter (Skeleton)
+## Team Decision Arbiter（Integrated with Gate）
 ### 中文（ZH）
-- 模块：`lib/decision_arbiter.py`
-- 职责：对 `codex`/`gemini` 的结构化决策做 deterministic 打分与一致性比较，输出 `winner`、`confidence`、`ask`、`conflicts`。
-- 范围：当前仅提供本地模块与 unit tests，尚未接入 `orchestrator` 主流程，不影响现有运行路径。
+- 模块：`lib/decision_arbiter.py`（已接入 `team` 主流程）
+- 位置：`codex/gemini` 结构化决策产出后、`team-summary` 汇总前，输出 `winner`、`confidence`、`ask`、`conflicts`。
+- 决策产物：`.ai/team/runs/<run-id>/decisions/` 下落盘 `context-pack.json`、`codex.json`、`gemini.json`、`arbiter.json`，用于审计与复现。
+- Gate 控制：`OMO_TEAM_ARBITER_GATE=off|soft|strict`；默认兼容策略为 `soft`（保留历史输出契约，仅附加 arbiter 决策，不自动阻断），`strict` 才执行 fail-fast 阻断，`off` 完全回退旧行为。
 
 ### English (EN)
-- Module: `lib/decision_arbiter.py`
-- Responsibility: deterministic scoring + agreement checks for structured `codex`/`gemini` decisions, returning `winner`, `confidence`, `ask`, and `conflicts`.
-- Scope: local module and unit tests only; not wired into the main `orchestrator` runtime path yet.
+- Module: `lib/decision_arbiter.py` (wired into the `team` runtime path)
+- Placement: after structured `codex/gemini` decisions and before final `team-summary`, returning `winner`, `confidence`, `ask`, and `conflicts`.
+- Decision artifacts: `.ai/team/runs/<run-id>/decisions/` persists `context-pack.json`, `codex.json`, `gemini.json`, and `arbiter.json` for auditability and replay.
+- Gate control: `OMO_TEAM_ARBITER_GATE=off|soft|strict`; default compatibility strategy is `soft` (keep legacy output contract, append arbiter decisions, no automatic blocking), while `strict` enforces fail-fast blocking and `off` fully falls back to legacy behavior.

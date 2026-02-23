@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
@@ -12,9 +13,64 @@ from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 from .agents import AgentRunResult
+from .decision_arbiter import arbiter
 from .run_registry import ensure_project_registry
 
 _BJT = ZoneInfo("Asia/Shanghai")
+_RISK_HINTS = (
+    "risk",
+    "风险",
+    "security",
+    "critical",
+    "high risk",
+    "low risk",
+    "breaking",
+    "severe",
+    "data-loss",
+)
+_ACTION_HINTS = (
+    "action",
+    "建议",
+    "修复",
+    "implement",
+    "add ",
+    "update",
+    "migrate",
+    "refactor",
+    "rollback",
+    "步骤",
+    "todo",
+    "plan",
+)
+_VERIFY_HINTS = ("verify", "verification", "验证", "测试", "test")
+_VERIFY_PREFIXES = (
+    "./",
+    "scripts/",
+    "pytest",
+    "python ",
+    "python3 ",
+    "npm ",
+    "pnpm ",
+    "yarn ",
+    "make ",
+    "go test",
+    "cargo test",
+    "uv ",
+    "bash ",
+    "sh ",
+    "node ",
+)
+
+
+def _arbiter_gate_mode() -> str:
+    raw = os.getenv("OMO_TEAM_ARBITER_GATE", "").strip().lower()
+    if raw in {"1", "true", "strict"}:
+        return "strict"
+    if raw in {"0", "false", "off"}:
+        return "off"
+    if raw in {"", "soft"}:
+        return "soft"
+    return "soft"
 
 
 def _readable_keywords(text: str) -> str:
@@ -63,6 +119,143 @@ def _write_jsonl(path: Path, rows: Sequence[dict[str, Any]]) -> None:
     with path.open("w", encoding="utf-8") as handle:
         for row in rows:
             handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+
+def _strip_md_list_prefix(text: str) -> str:
+    stripped = re.sub(r"^\s*[-*+]\s+", "", text)
+    stripped = re.sub(r"^\s*\d+[.)]\s+", "", stripped)
+    return stripped.strip()
+
+
+def _dedupe_keep_order(items: Sequence[str]) -> list[str]:
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for item in items:
+        normalized = item.strip()
+        if not normalized:
+            continue
+        lowered = normalized.lower()
+        if lowered in seen:
+            continue
+        seen.add(lowered)
+        deduped.append(normalized)
+    return deduped
+
+
+def _normalize_to_str_list(value: Any) -> list[str]:
+    if isinstance(value, str):
+        stripped = value.strip()
+        return [stripped] if stripped else []
+    if isinstance(value, (list, tuple, set)):
+        return _dedupe_keep_order([str(item).strip() for item in value if str(item).strip()])
+    return []
+
+
+def _looks_like_verification_command(text: str) -> bool:
+    lowered = text.strip().lower()
+    if not lowered:
+        return False
+    if lowered.startswith(_VERIFY_PREFIXES):
+        return True
+    return any(hint in lowered for hint in _VERIFY_HINTS)
+
+
+def _extract_model_lists(stdout_text: str) -> tuple[list[str], list[str], list[str]]:
+    actions: list[str] = []
+    risks: list[str] = []
+    verification: list[str] = []
+    for raw_line in stdout_text.splitlines():
+        line = _strip_md_list_prefix(raw_line)
+        if not line:
+            continue
+
+        lower_line = line.lower()
+        inline_code = [code.strip() for code in re.findall(r"`([^`]+)`", line) if code.strip()]
+        for snippet in inline_code:
+            if _looks_like_verification_command(snippet):
+                verification.append(snippet)
+
+        if _looks_like_verification_command(line):
+            verification.append(line)
+
+        if any(hint in lower_line for hint in _RISK_HINTS):
+            risks.append(line)
+            continue
+        if any(hint in lower_line for hint in _ACTION_HINTS):
+            actions.append(line)
+            continue
+        if any(hint in lower_line for hint in _VERIFY_HINTS):
+            verification.append(line)
+
+    return (
+        _dedupe_keep_order(actions),
+        _dedupe_keep_order(risks),
+        _dedupe_keep_order(verification),
+    )
+
+
+def _infer_model_status(stdout_text: str, failure_reason: str, returncode: int) -> str:
+    if returncode != 0 or failure_reason.strip():
+        return "fail"
+    lowered = stdout_text.lower()
+    if any(token in lowered for token in ("blocked", "blocker", "failed", "failure", "error")):
+        return "blocked"
+    if stdout_text.strip():
+        return "success"
+    return "unknown"
+
+
+def _build_model_decision(
+    *,
+    model: str,
+    stdout_text: str,
+    failure_reason: str,
+    returncode: int,
+) -> dict[str, Any]:
+    structured_payload: dict[str, Any] | None = None
+    stripped_stdout = stdout_text.strip()
+    if stripped_stdout.startswith("{") and stripped_stdout.endswith("}"):
+        try:
+            parsed = json.loads(stripped_stdout)
+            if isinstance(parsed, dict):
+                structured_payload = parsed
+        except json.JSONDecodeError:
+            structured_payload = None
+
+    if structured_payload is not None:
+        actions = _normalize_to_str_list(structured_payload.get("actions"))
+        risks = _normalize_to_str_list(structured_payload.get("risks"))
+        verification = _normalize_to_str_list(structured_payload.get("verification"))
+        status = str(structured_payload.get("status", "")).strip() or _infer_model_status(
+            stdout_text, failure_reason, returncode
+        )
+    else:
+        actions, risks, verification = _extract_model_lists(stdout_text)
+        status = _infer_model_status(stdout_text, failure_reason, returncode)
+
+    if failure_reason.strip():
+        risks.append(f"viewpoint-failure: {failure_reason.strip()}")
+
+    risks = _dedupe_keep_order(risks) or ["low"]
+    verification = _dedupe_keep_order(verification) or ["./scripts/verify"]
+    return {
+        "model": model,
+        "status": status,
+        "actions": actions,
+        "risks": risks,
+        "verification": verification,
+    }
+
+
+def _arbiter_ask_reason(arbiter_result: dict[str, Any]) -> str:
+    winner = str(arbiter_result.get("winner", "unknown"))
+    conflicts = [str(item) for item in arbiter_result.get("conflicts", [])]
+    conflict_text = ", ".join(conflicts) if conflicts else "no-explicit-conflicts"
+    confidence = arbiter_result.get("confidence", {})
+    joint = confidence.get("joint") if isinstance(confidence, dict) else None
+    if isinstance(joint, (int, float)):
+        return f"ask=true; winner={winner}; joint={joint:.4f}; conflicts={conflict_text}"
+    return f"ask=true; winner={winner}; conflicts={conflict_text}"
 
 
 def _persist_team_registry(
@@ -174,6 +367,7 @@ def run_team(
     outputs: list[dict[str, Any]] = []
     agent_notes: dict[str, str] = {}
     viewpoint_failures: list[str] = []
+    viewpoint_stdout: dict[str, str] = {}
     prompts = {
         "claude": "从架构设计和长期维护角度讨论。",
         "codex": "从实现复杂度和开发效率角度分析。",
@@ -241,6 +435,7 @@ def run_team(
                 "- note: deterministic dry-run placeholder\n"
                 f"- focus: {prompts[agent]}\n"
             )
+        viewpoint_stdout[agent] = stdout_text
         stdout_empty = not bool(stdout_text.strip())
         stdout_len = len(stdout_text.strip())
         stderr_len = len(result.stderr.strip())
@@ -355,10 +550,98 @@ def run_team(
                 "output_file": str(summary_path),
             }
         ]
+
+    output_by_agent = {str(item.get("agent", "")): item for item in outputs}
+    codex_output = output_by_agent.get("codex", {})
+    gemini_output = output_by_agent.get("gemini", {})
+    codex_result = viewpoint_results.get("codex")
+    gemini_result = viewpoint_results.get("gemini")
+    if codex_result is None:
+        codex_result = _viewpoint_exception_result(
+            "codex",
+            "viewpoint internal error: missing result from scheduler",
+        )
+    if gemini_result is None:
+        gemini_result = _viewpoint_exception_result(
+            "gemini",
+            "viewpoint internal error: missing result from scheduler",
+        )
+
+    codex_decision = _build_model_decision(
+        model="codex",
+        stdout_text=viewpoint_stdout.get("codex", codex_result.stdout.strip()),
+        failure_reason=str(codex_output.get("failure_reason", "")),
+        returncode=int(codex_output.get("returncode", codex_result.returncode)),
+    )
+    gemini_decision = _build_model_decision(
+        model="gemini",
+        stdout_text=viewpoint_stdout.get("gemini", gemini_result.stdout.strip()),
+        failure_reason=str(gemini_output.get("failure_reason", "")),
+        returncode=int(gemini_output.get("returncode", gemini_result.returncode)),
+    )
+    arbiter_result = arbiter(codex_decision, gemini_decision)
+
+    decisions_dir = run_dir / "decisions"
+    context_pack_path = decisions_dir / "context-pack.json"
+    codex_decision_path = decisions_dir / "codex.json"
+    gemini_decision_path = decisions_dir / "gemini.json"
+    arbiter_path = decisions_dir / "arbiter.json"
+    ask_path = decisions_dir / "ask.json"
+
+    context_pack = {
+        "run_id": run_id,
+        "topic": topic,
+        "mode": mode,
+        "team_agents": list(team_agents),
+        "viewpoints_ok": viewpoints_ok,
+    }
+    orch._write_json(context_pack_path, context_pack)
+    orch._write_json(codex_decision_path, codex_decision)
+    orch._write_json(gemini_decision_path, gemini_decision)
+    orch._write_json(arbiter_path, arbiter_result)
+
+    ask_payload: dict[str, Any] | None = None
+    if bool(arbiter_result.get("ask")):
+        ask_payload = {
+            "reason": _arbiter_ask_reason(arbiter_result),
+            "conflicts": list(arbiter_result.get("conflicts", [])),
+            "winner": arbiter_result.get("winner", ""),
+            "confidence": dict(arbiter_result.get("confidence", {})),
+        }
+        orch._write_json(ask_path, ask_payload)
+
+    gate_mode = _arbiter_gate_mode()
+    gate_enabled = gate_mode == "strict"
+    gate_failed = gate_enabled and bool(arbiter_result.get("ask"))
+    gate_reason = ""
+    if gate_failed:
+        gate_reason = (
+            ask_payload["reason"]
+            if ask_payload is not None
+            else _arbiter_ask_reason(arbiter_result)
+        )
+        viewpoint_failures.append(f"arbiter_gate: {gate_reason}")
+
     orch._write_text(latest_dir / "team-summary.md", summary_content)
+    viewpoints_ok = len(viewpoint_failures) == 0
     team_ok = stage0.ok and viewpoints_ok and all(item["returncode"] == 0 for item in summary_steps)
     run_status = "completed" if team_ok else "failed"
     ran_at = utc_now()
+    arbiter_payload = {
+        **arbiter_result,
+        "codex": codex_decision,
+        "gemini": gemini_decision,
+        "context_pack_file": str(context_pack_path),
+        "codex_file": str(codex_decision_path),
+        "gemini_file": str(gemini_decision_path),
+        "arbiter_file": str(arbiter_path),
+        "ask_file": str(ask_path) if ask_payload is not None else "",
+        "ask_payload": ask_payload,
+        "gate_mode": gate_mode,
+        "gate_enabled": gate_enabled,
+        "gate_failed": gate_failed,
+        "gate_reason": gate_reason,
+    }
     run_meta = {
         "run_id": run_id,
         "topic": topic,
@@ -370,6 +653,7 @@ def run_team(
         "outputs": outputs,
         "summary_steps": summary_steps,
         "summary_file": str(summary_path),
+        "arbiter": arbiter_payload,
     }
     meta_path = run_dir / "meta.json"
     orch._write_json(meta_path, run_meta)
@@ -410,6 +694,7 @@ def run_team(
     state["team"]["summary_steps"] = summary_steps
     state["team"]["run_dir"] = str(run_dir)
     state["team"]["summary_file"] = str(summary_path)
+    state["team"]["arbiter"] = arbiter_payload
     orch.save_state(state)
     return {
         "ok": team_ok,
@@ -423,4 +708,5 @@ def run_team(
         "summary_file": str(summary_path),
         "latest_summary_file": str(latest_dir / "team-summary.md"),
         "meta_file": str(meta_path),
+        "arbiter": arbiter_payload,
     }
