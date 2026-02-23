@@ -17,9 +17,12 @@ from typing import Any
 
 TOOL_SLUGS = {"claude", "codex", "gemini"}
 
-UHK_ROOT = Path("/Users/Zhuanz/Documents/Code/universal-harness-kit")
-CSM_ROOT = Path("/Users/Zhuanz/Documents/Code/claude-session-manager")
-HANDOFF_ROOT = Path("/Users/Zhuanz/Documents/Code/cli-handoff-bundle/_handoff")
+HOME_CODE_ROOT = Path.home() / "Documents" / "Code"
+UHK_ROOT = Path(os.environ.get("OMO_UHK_ROOT", str(HOME_CODE_ROOT / "universal-harness-kit")))
+CSM_ROOT = Path(os.environ.get("OMO_CSM_ROOT", str(HOME_CODE_ROOT / "claude-session-manager")))
+HANDOFF_ROOT = Path(
+    os.environ.get("OMO_HANDOFF_ROOT", str(HOME_CODE_ROOT / "cli-handoff-bundle" / "_handoff"))
+)
 
 
 @dataclass(slots=True)

@@ -35,5 +35,6 @@ venv/
 .ai/review.md
 .ai/team-summary.md
 .ai/team/
+.ai/pipeline/
 .ai/pipeline/runs/
 .ai/pipeline/latest/

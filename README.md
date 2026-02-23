@@ -83,7 +83,7 @@ python omo.py pipeline "接入 SSO 登录"
 ### 常见问题与排障（troubleshooting）
 - `pipeline` 卡在策略检查：先手动运行  
   `./scripts/verify` 与  
-  `/Users/Zhuanz/Documents/Code/universal-harness-kit/scripts/agent-policy-stack --tool codex --cwd "$PWD" --strict --strict-profile harness`
+  `$HOME/Documents/Code/universal-harness-kit/scripts/agent-policy-stack --tool codex --cwd "$PWD" --strict --strict-profile harness`
 - 真实 CLI 调用失败：先验证 `claude/codex/gemini` 在当前 shell 可执行并已登录，再重跑命令
 - 需要快速清理残留 worktree：执行 `python omo.py cleanup`
 
@@ -172,6 +172,6 @@ python omo.py pipeline "Integrate SSO login"
 ### Troubleshooting
 - Pipeline blocked by policy checks: run  
   `./scripts/verify` and  
-  `/Users/Zhuanz/Documents/Code/universal-harness-kit/scripts/agent-policy-stack --tool codex --cwd "$PWD" --strict --strict-profile harness`
+  `$HOME/Documents/Code/universal-harness-kit/scripts/agent-policy-stack --tool codex --cwd "$PWD" --strict --strict-profile harness`
 - Live CLI failures: verify `claude/codex/gemini` availability and auth in your current shell
 - To clean residual worktree quickly: run `python omo.py cleanup`
