@@ -63,7 +63,12 @@ python omo.py pipeline "接入 SSO 登录"
 - 输出：标准 JSON 到 stdout（便于管道/自动化消费）
 - 状态文件：`.omo/pipeline-state.json`
 - 会话文件：`.omo/session.jsonl`、`.omo/chat-history.jsonl`
-- 关键产物：`.ai/project-brief.md`、`.ai/exec-plan.md`、`.ai/review.md`
+- 关键产物（兼容入口）：`.ai/project-brief.md`、`.ai/exec-plan.md`、`.ai/review.md`
+- Pipeline 产物目录：`.ai/pipeline/runs/<run-id>/`（每次运行新目录；`run-id` 命名为“日期-时间-梗概-短哈希”：`YYYYMMDD-HHMMSS-<summary>-<short-hash>`，时间为北京时间 `Asia/Shanghai`；含 `project-brief.md`、`exec-plan.md`、`review.md`、`pipeline-summary.md`、`meta.json`）
+- Pipeline 最新快照：`.ai/pipeline/latest/`（含 `pipeline-summary.md`、`run.json`）
+- Team 产物目录：`.ai/team/runs/<run-id>/`（`run-id` 同样使用北京时间 `Asia/Shanghai`，格式 `YYYYMMDD-HHMMSS-<summary>-<short-hash>`；示例：`20260223-184512-auth-refactor-a1b2c3d4`；含 `agents/*.md`、`team-summary.md`、`meta.json`）
+- Team 最新摘要：`.ai/team/latest/team-summary.md`
+- 最终 team summary 由 Gemini 汇总输出（基于 team viewpoints）。
 
 #### flags
 - `-h, --help`：顶层命令和各子命令都支持帮助信息
@@ -147,7 +152,12 @@ python omo.py pipeline "Integrate SSO login"
 - Output: JSON payload to stdout
 - State files: `.omo/pipeline-state.json`
 - Session files: `.omo/session.jsonl`, `.omo/chat-history.jsonl`
-- Key artifacts: `.ai/project-brief.md`, `.ai/exec-plan.md`, `.ai/review.md`
+- Key artifacts (compat paths): `.ai/project-brief.md`, `.ai/exec-plan.md`, `.ai/review.md`
+- Pipeline artifacts: `.ai/pipeline/runs/<run-id>/` (new directory per run; `run-id` format `YYYYMMDD-HHMMSS-<summary>-<short-hash>` in Beijing time `Asia/Shanghai`; includes `project-brief.md`, `exec-plan.md`, `review.md`, `pipeline-summary.md`, `meta.json`)
+- Latest pipeline snapshot: `.ai/pipeline/latest/` (contains `pipeline-summary.md`, `run.json`)
+- Team artifacts: `.ai/team/runs/<run-id>/` (`run-id` also uses Beijing time `Asia/Shanghai` with `YYYYMMDD-HHMMSS-<summary>-<short-hash>`; example: `20260223-184512-auth-refactor-a1b2c3d4`; includes `agents/*.md`, `team-summary.md`, `meta.json`)
+- Latest team summary: `.ai/team/latest/team-summary.md`
+- The final team summary is consolidated by Gemini (from team viewpoints).
 
 #### flags
 - `-h, --help`: available on the top-level command and every subcommand

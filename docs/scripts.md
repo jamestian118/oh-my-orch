@@ -19,6 +19,7 @@
 ./scripts/test
 ./scripts/arch-check
 ./scripts/verify
+./scripts/live-smoke
 ./scripts/finalize-artifacts dry-run
 ./scripts/milestone-finalize
 ./scripts/publish
@@ -31,6 +32,12 @@
 
 # 最小验证（milestone/stop/切换 CLI 前）
 ./scripts/verify
+
+# 最小 live smoke（只做检查，不触发真实 chat）
+./scripts/live-smoke --dry-run
+
+# 在 verify 中启用 live smoke（默认关闭）
+OMO_ENABLE_LIVE_SMOKE=1 ./scripts/verify
 ```
 
 ### I/O
@@ -58,8 +65,25 @@
 ### verify
 - 最小验证入口；先校验 `.harness` 存在，不存在则立即失败
 - 顺序执行并汇总状态：`format -> lint -> test -> arch-check -> docs-check -> secrets-check -> gc --strict`
+- 可选 live smoke：仅当 `OMO_ENABLE_LIVE_SMOKE=1` 时追加执行 `./scripts/live-smoke`；默认打印 skip 信息且不阻断
 - 即使某一步失败，仍会继续后续步骤并在退出时写入 `.ai/verify-log.json`（含 `run_id/spans/overall`）
 - 最终输出：全部通过打印 `[verify] OK`；任一步失败打印 `[verify] FAIL` 并以非 0 退出
+
+### live-smoke
+```bash
+./scripts/live-smoke
+./scripts/live-smoke --dry-run
+./scripts/live-smoke --timeout 45
+```
+- 目标：提供最小 live path 验证，降低上游 CLI 漂移风险
+- 检查项：
+  - `claude/codex/gemini` binary 快速探测（优先 `--version`，失败回退 `-h`）
+  - 一条最小 live 路径：`python omo.py pipeline "live smoke ping" --stop-after 0 --no-auto-confirm`（带 timeout）
+- 输出：machine-readable JSON，至少包含 `checks`、`ok`、`reason` 字段
+- 常用环境变量：
+  - `OMO_LIVE_SMOKE_TIMEOUT_SEC`：live 路径 timeout（默认 60 秒）
+  - `OMO_LIVE_SMOKE_PROBE_TIMEOUT_SEC`：binary probe timeout（默认 5 秒）
+  - `OMO_LIVE_SMOKE_PROMPT`：覆盖默认 prompt（`live smoke ping`）
 
 ### finalize-artifacts
 ```bash
@@ -115,6 +139,7 @@
 ./scripts/gc
 ```
 - 抗熵检查入口，扫描项目中违反 golden principles 的 drift
+- 扫描边界：按各检查项的目标路径扫描；全仓 grep 类检查会排除 runtime artifacts（`.ai/team/`、`.ai/team/runs/`、`.ai/team/latest/`、`.ai/pipeline/runs/`、`.ai/pipeline/latest/`）
 - 检查 1：scripts/ 下每个可执行脚本是否在 docs/scripts.md 中有记录
 - 检查 2：裸 TODO（不含 issue 编号或截止日期）
 - 检查 3：docs/ 中是否混入动态进度（日期模式）
@@ -139,7 +164,8 @@
 - 退出时输出日志路径
 
 ### troubleshooting
-- verify 失败：先看是哪一步失败（format/lint/test/arch-check/docs-check/secrets-check/gc），修复后重新运行 verify
+- verify 失败：先看是哪一步失败（format/lint/test/arch-check/docs-check/secrets-check/gc/live-smoke），修复后重新运行 verify
+- live-smoke 失败：先跑 `./scripts/live-smoke --dry-run` 区分 binary 问题与真实 live 路径问题，再决定是否开启 `OMO_ENABLE_LIVE_SMOKE=1`
 - secrets-check 误报：优先改为更精确规则或引入专用 secrets 扫描工具（仍通过 scripts/ 与 CI 入口统一调用）
 
 ---
@@ -163,6 +189,7 @@
 ./scripts/test
 ./scripts/arch-check
 ./scripts/verify
+./scripts/live-smoke
 ./scripts/finalize-artifacts dry-run
 ./scripts/milestone-finalize
 ./scripts/publish
@@ -175,6 +202,12 @@
 
 # minimal verification (before milestone/stop/CLI switch)
 ./scripts/verify
+
+# minimal live smoke (checks only, no real chat)
+./scripts/live-smoke --dry-run
+
+# enable live smoke inside verify (disabled by default)
+OMO_ENABLE_LIVE_SMOKE=1 ./scripts/verify
 ```
 
 ### I/O
@@ -202,8 +235,25 @@
 ### verify
 - Minimal verification entrypoint; first checks `.harness`, and fails immediately if missing
 - Runs and aggregates the exact sequence: `format -> lint -> test -> arch-check -> docs-check -> secrets-check -> gc --strict`
+- Optional live smoke: only runs `./scripts/live-smoke` when `OMO_ENABLE_LIVE_SMOKE=1`; otherwise prints a skip message and does not block by default
 - Even if one stage fails, it still executes remaining stages and writes `.ai/verify-log.json` on exit (`run_id/spans/overall`)
 - Final output: prints `[verify] OK` when all pass; prints `[verify] FAIL` and exits non-zero if any stage fails
+
+### live-smoke
+```bash
+./scripts/live-smoke
+./scripts/live-smoke --dry-run
+./scripts/live-smoke --timeout 45
+```
+- Purpose: add a minimal live-path guard to reduce upstream CLI drift risk
+- Checks:
+  - quick binary probes for `claude/codex/gemini` (prefer `--version`, fallback to `-h`)
+  - one minimal live path: `python omo.py pipeline "live smoke ping" --stop-after 0 --no-auto-confirm` with timeout protection
+- Output: machine-readable JSON with at least `checks`, `ok`, and `reason`
+- Common env vars:
+  - `OMO_LIVE_SMOKE_TIMEOUT_SEC`: timeout for live path (default: 60s)
+  - `OMO_LIVE_SMOKE_PROBE_TIMEOUT_SEC`: timeout for binary probes (default: 5s)
+  - `OMO_LIVE_SMOKE_PROMPT`: override default prompt (`live smoke ping`)
 
 ### finalize-artifacts
 ```bash
@@ -256,6 +306,7 @@
 ./scripts/gc
 ```
 - Anti-entropy check entry point; scans the project for drift against golden principles
+- Scan boundary: each check runs on its target paths; repo-wide grep-style checks exclude runtime artifacts (`.ai/team/`, `.ai/team/runs/`, `.ai/team/latest/`, `.ai/pipeline/runs/`, `.ai/pipeline/latest/`)
 - Check 1: every executable script in scripts/ is documented in docs/scripts.md
 - Check 2: bare TODOs (missing issue number or deadline)
 - Check 3: dynamic progress dates leaked into docs/
@@ -280,5 +331,6 @@
 - Prints log path on exit
 
 ### troubleshooting
-- If verify fails: identify the failed stage (format/lint/test/arch-check/docs-check/secrets-check/gc), fix it, then rerun verify.
+- If verify fails: identify the failed stage (format/lint/test/arch-check/docs-check/secrets-check/gc/live-smoke), fix it, then rerun verify.
+- If live-smoke fails: run `./scripts/live-smoke --dry-run` first to separate binary probe failures from real live-path failures, then decide whether to enable `OMO_ENABLE_LIVE_SMOKE=1`.
 - If secrets-check false-positives: tighten patterns or adopt a dedicated secrets scanner (still invoked via scripts/ and CI).

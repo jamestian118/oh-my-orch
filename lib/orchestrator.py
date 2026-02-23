@@ -17,11 +17,22 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from .agents import AgentRunResult, CLIAgent
 from .bus import MessageBus
 from .context import ContextManager
 from .integrations import IntegrationHub, build_integrations
+from .orchestrator_pipeline import (
+    run_cleanup as run_cleanup_command,
+)
+from .orchestrator_pipeline import (
+    run_pipeline as run_pipeline_command,
+)
+from .orchestrator_pipeline import (
+    run_resume as run_resume_command,
+)
+from .orchestrator_team import run_team as run_team_command
 
 PIPELINE_STAGES = [
     "stage0_project_brief",
@@ -39,10 +50,15 @@ ARTIFACT_PATHS = {
 }
 
 TEAM_AGENTS = ("claude", "codex", "gemini")
+_BJT = ZoneInfo("Asia/Shanghai")
 
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def _bjt_now() -> str:
+    return datetime.now(_BJT).replace(microsecond=0).isoformat()
 
 
 def _slug(text: str) -> str:
@@ -120,6 +136,13 @@ class Orchestrator:
                 "retry_count": 0,
                 "worktree_path": "",
                 "worktree_branch": "",
+                "run_id": "",
+                "run_dir": "",
+                "latest_dir": "",
+                "summary_file": "",
+                "meta_file": "",
+                "latest_summary_file": "",
+                "latest_meta_file": "",
                 "started_at": "",
                 "finished_at": "",
                 "artifacts": {name: str(path) for name, path in ARTIFACT_PATHS.items()},
@@ -130,6 +153,9 @@ class Orchestrator:
                 "ran_at": "",
                 "last_mode": "",
                 "outputs": [],
+                "summary_steps": [],
+                "run_dir": "",
+                "summary_file": "",
             },
         }
 
@@ -237,6 +263,13 @@ class Orchestrator:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content.rstrip() + "\n", encoding="utf-8")
 
+    def _write_json(self, path: Path, payload: dict[str, Any]) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+
     def _fallback_project_brief(self, task: str) -> str:
         return (
             "# Project Brief\n\n"
@@ -310,9 +343,7 @@ class Orchestrator:
     # ---------------------------------------------------------------------
     def _create_worktree(self, task: str, run_dry: bool) -> tuple[Path, str]:
         sandbox = self.omo_dir / "sandbox"
-        branch = (
-            f"omo-sandbox-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}-{_slug(task)[:16]}"
-        )
+        branch = f"omo-sandbox-{datetime.now(_BJT).strftime('%Y%m%d%H%M%S')}-{_slug(task)[:16]}"
 
         if run_dry:
             sandbox.mkdir(parents=True, exist_ok=True)
@@ -603,284 +634,26 @@ class Orchestrator:
         stop_after: int | None = None,
         resume: bool = False,
     ) -> dict[str, Any]:
-        run_dry, mode = self._resolve_mode(dry_run)
-        task = task.strip()
-        if not task:
-            raise ValueError("pipeline task 不能为空")
-
-        state = self.load_state()
-        if not resume:
-            state["pipeline"].update(
-                {
-                    "task": task,
-                    "status": "in_progress",
-                    "current_stage": PIPELINE_STAGES[0],
-                    "completed_stages": [],
-                    "retry_count": 0,
-                    "worktree_path": "",
-                    "worktree_branch": "",
-                    "started_at": _utc_now(),
-                    "finished_at": "",
-                    "last_error": "",
-                }
-            )
-        state["last_action"] = "pipeline"
-        self.save_state(state)
-
-        if not run_dry:
-            preflight = self.integrations.policy_check(cwd=self.root)
-            if not preflight.ok:
-                state["pipeline"]["status"] = "blocked"
-                state["pipeline"]["last_error"] = preflight.error or "policy check failed"
-                self.save_state(state)
-                return {
-                    "ok": False,
-                    "command": "pipeline",
-                    "mode": mode,
-                    "error": state["pipeline"]["last_error"],
-                }
-
-        start_index = 0
-        if resume and state["pipeline"]["current_stage"] in PIPELINE_STAGES:
-            start_index = PIPELINE_STAGES.index(state["pipeline"]["current_stage"])
-
-        worktree_path = Path(state["pipeline"].get("worktree_path", "") or self.root)
-        worktree_branch = state["pipeline"].get("worktree_branch", "")
-        stage_results: list[dict[str, Any]] = []
-
-        try:
-            for index, stage in enumerate(PIPELINE_STAGES[start_index:], start=start_index):
-                state["pipeline"]["current_stage"] = stage
-                self.save_state(state)
-
-                if stage == "stage0_project_brief":
-                    result = self._stage0_project_brief(task, run_dry=run_dry, cwd=self.root)
-                elif stage == "stage1_exec_plan":
-                    result = self._stage1_exec_plan(task, run_dry=run_dry, cwd=self.root)
-                    exec_plan = self._artifact_abs("exec_plan", cwd=self.root)
-                    if not exec_plan.exists():
-                        self._write_text(exec_plan, self._fallback_exec_plan(task))
-                    if not self.auto_confirm and sys.stdin.isatty() and not run_dry:
-                        answer = input("执行方案已生成，继续执行？[Y/n] ").strip().lower()
-                        if answer in {"n", "no"}:
-                            state["pipeline"]["status"] = "blocked"
-                            state["pipeline"]["last_error"] = (
-                                "user aborted after exec-plan confirmation"
-                            )
-                            self.save_state(state)
-                            return {
-                                "ok": False,
-                                "command": "pipeline",
-                                "mode": mode,
-                                "stage_results": stage_results,
-                                "error": state["pipeline"]["last_error"],
-                            }
-
-                    history_text = self._history_text(limit=120)
-                    compact = self.context.compress_context(
-                        history_text or task,
-                        target_agent="codex",
-                        dry_run=run_dry,
-                    )
-                    state["pipeline"]["codex_handoff"] = compact.summary
-                elif stage == "stage2_codex_execute":
-                    if not worktree_branch:
-                        worktree_path, worktree_branch = self._create_worktree(
-                            task, run_dry=run_dry
-                        )
-                        state["pipeline"]["worktree_path"] = str(worktree_path)
-                        state["pipeline"]["worktree_branch"] = worktree_branch
-                    summary = state["pipeline"].get("codex_handoff", "")
-                    result = self._stage2_codex_execute(
-                        summary=summary,
-                        run_dry=run_dry,
-                        cwd=worktree_path,
-                    )
-                elif stage == "stage3_gemini_review":
-                    if not worktree_path.exists():
-                        worktree_path = self.root
-                    result = self._stage3_gemini_review(run_dry=run_dry, cwd=worktree_path)
-                    if run_dry and worktree_path != self.root:
-                        sandbox_review = self._artifact_abs("review", cwd=worktree_path)
-                        root_review = self._artifact_abs("review", cwd=self.root)
-                        if sandbox_review.exists():
-                            self._write_text(
-                                root_review, sandbox_review.read_text(encoding="utf-8")
-                            )
-                elif stage == "stage4_codex_fix":
-                    if not worktree_path.exists():
-                        worktree_path = self.root
-                    result = self._stage4_codex_fix(run_dry=run_dry, cwd=worktree_path)
-                elif stage == "stage5_final_review":
-                    if not worktree_path.exists():
-                        worktree_path = self.root
-
-                    review_result = None
-                    for attempt in range(self.max_review_loops + 1):
-                        state["pipeline"]["retry_count"] = attempt
-                        review_result = self._stage5_final_review(
-                            run_dry=run_dry, cwd=worktree_path
-                        )
-                        if review_result.ok:
-                            break
-                        if attempt < self.max_review_loops:
-                            fix_result = self._stage4_codex_fix(run_dry=run_dry, cwd=worktree_path)
-                            stage_results.append(
-                                {
-                                    "stage": fix_result.stage,
-                                    "ok": fix_result.ok,
-                                    "details": fix_result.details,
-                                    "retry": attempt + 1,
-                                }
-                            )
-                    if review_result is None:
-                        review_result = StageResult(stage, False, {"reason": "no review result"})
-                    result = review_result
-                else:
-                    result = StageResult(stage, False, {"error": "unknown stage"})
-
-                stage_results.append(
-                    {"stage": result.stage, "ok": result.ok, "details": result.details}
-                )
-                if result.ok:
-                    if stage not in state["pipeline"]["completed_stages"]:
-                        state["pipeline"]["completed_stages"].append(stage)
-                else:
-                    state["pipeline"]["status"] = "failed"
-                    state["pipeline"]["last_error"] = f"{stage} failed"
-                    self.save_state(state)
-                    return {
-                        "ok": False,
-                        "command": "pipeline",
-                        "mode": mode,
-                        "stage_results": stage_results,
-                        "error": state["pipeline"]["last_error"],
-                    }
-
-                self.save_state(state)
-                if stop_after is not None and index >= stop_after:
-                    return {
-                        "ok": True,
-                        "command": "pipeline",
-                        "mode": mode,
-                        "stopped_after": index,
-                        "stage_results": stage_results,
-                        "state_file": str(self.state_path),
-                    }
-
-            if worktree_branch and not run_dry:
-                merged, merge_log = self._merge_worktree_branch(worktree_branch)
-                if not merged:
-                    state["pipeline"]["status"] = "failed"
-                    state["pipeline"]["last_error"] = f"merge failed: {merge_log}"
-                    self.save_state(state)
-                    return {
-                        "ok": False,
-                        "command": "pipeline",
-                        "mode": mode,
-                        "stage_results": stage_results,
-                        "error": state["pipeline"]["last_error"],
-                    }
-                self._remove_worktree(path=worktree_path, branch=worktree_branch, force=False)
-
-            state["pipeline"]["status"] = "completed"
-            state["pipeline"]["current_stage"] = ""
-            state["pipeline"]["finished_at"] = _utc_now()
-            state["pipeline"]["last_error"] = ""
-            self.save_state(state)
-            return {
-                "ok": True,
-                "command": "pipeline",
-                "mode": mode,
-                "stage_results": stage_results,
-                "state_file": str(self.state_path),
-            }
-        except Exception as exc:
-            state["pipeline"]["status"] = "failed"
-            state["pipeline"]["last_error"] = str(exc)
-            self.save_state(state)
-            return {
-                "ok": False,
-                "command": "pipeline",
-                "mode": mode,
-                "stage_results": stage_results,
-                "error": str(exc),
-            }
+        return run_pipeline_command(
+            self,
+            task=task,
+            dry_run=dry_run,
+            stop_after=stop_after,
+            resume=resume,
+            pipeline_stages=PIPELINE_STAGES,
+            stage_result_cls=StageResult,
+            utc_now=_bjt_now,
+        )
 
     def team(self, *, topic: str, dry_run: bool | None = None) -> dict[str, Any]:
-        run_dry, mode = self._resolve_mode(dry_run)
-        topic = topic.strip()
-        if not topic:
-            raise ValueError("team topic 不能为空")
-
-        stage0 = self._stage0_project_brief(topic, run_dry=run_dry, cwd=self.root)
-        outputs: list[dict[str, Any]] = []
-        prompts = {
-            "claude": "从架构设计和长期维护角度讨论。",
-            "codex": "从实现复杂度和开发效率角度分析。",
-            "gemini": "从成本、性能、团队规模角度分析。",
-        }
-
-        for agent in TEAM_AGENTS:
-            agent_prompt = f"{topic}\n\n{prompts[agent]}"
-            result = self._run_agent(
-                agent=agent,
-                prompt=agent_prompt,
-                cwd=self.root,
-                interactive=not run_dry,
-                run_dry=run_dry,
-            )
-            outputs.append(
-                {
-                    "agent": agent,
-                    "returncode": result.returncode,
-                    "dry_run": result.dry_run,
-                }
-            )
-
-        synth_prompt = "请把 claude/codex/gemini 三方观点压缩为对比表。"
-        synth = self._run_agent(
-            agent="gemini",
-            prompt=synth_prompt,
-            cwd=self.root,
-            interactive=False,
-            run_dry=run_dry,
+        return run_team_command(
+            self,
+            topic=topic,
+            dry_run=dry_run,
+            team_agents=TEAM_AGENTS,
+            slug=_slug,
+            utc_now=_bjt_now,
         )
-
-        summary_prompt = (
-            "请综合三方观点给出结论与推荐路径。"
-            f"\nTopic: {topic}\n"
-            f"\nGemini synthesis:\n{synth.stdout}"
-        )
-        final = self._run_agent(
-            agent="claude",
-            prompt=summary_prompt,
-            cwd=self.root,
-            interactive=False,
-            run_dry=run_dry,
-        )
-        summary_path = self.ai_dir / "team-summary.md"
-        summary_content = (
-            final.stdout.strip() or f"# Team Summary\n\n- topic: {topic}\n- mode: {mode}\n"
-        )
-        self._write_text(summary_path, summary_content)
-
-        state = self.load_state()
-        state["last_action"] = "team"
-        state["team"]["topic"] = topic
-        state["team"]["ran_at"] = _utc_now()
-        state["team"]["last_mode"] = mode
-        state["team"]["outputs"] = outputs
-        self.save_state(state)
-        return {
-            "ok": stage0.ok and all(item["returncode"] == 0 for item in outputs),
-            "command": "team",
-            "mode": mode,
-            "topic": topic,
-            "agent_count": len(outputs),
-            "outputs": outputs,
-            "summary_file": str(summary_path),
-        }
 
     def status(self) -> dict[str, Any]:
         state = self.load_state()
@@ -949,76 +722,7 @@ class Orchestrator:
         }
 
     def resume(self, *, dry_run: bool | None = None) -> dict[str, Any]:
-        state = self.load_state()
-        task = state["pipeline"].get("task", "")
-        stage = state["pipeline"].get("current_stage", "")
-        status = state["pipeline"].get("status", "")
-        if not task:
-            return {
-                "ok": True,
-                "command": "resume",
-                "can_resume": False,
-                "message": "无可恢复 pipeline 任务。",
-            }
-        if status not in {"in_progress", "blocked", "failed"}:
-            return {
-                "ok": True,
-                "command": "resume",
-                "can_resume": False,
-                "message": f"当前状态为 {status}，无需恢复。",
-            }
-        if stage and stage not in PIPELINE_STAGES:
-            stage = PIPELINE_STAGES[0]
-            state["pipeline"]["current_stage"] = stage
-            self.save_state(state)
-        resumed = self.pipeline(task=task, dry_run=dry_run, resume=True)
-        resumed["command"] = "resume"
-        resumed["can_resume"] = True
-        resumed["resume_from"] = stage or PIPELINE_STAGES[0]
-        return resumed
+        return run_resume_command(self, dry_run=dry_run, pipeline_stages=PIPELINE_STAGES)
 
     def cleanup(self) -> dict[str, Any]:
-        state = self.load_state()
-        removed: list[str] = []
-        skipped: list[str] = []
-        worktree_raw = str(state["pipeline"].get("worktree_path", "") or "").strip()
-        worktree_path = Path(worktree_raw) if worktree_raw else None
-        worktree_branch = state["pipeline"].get("worktree_branch", "")
-
-        if worktree_path is not None:
-            if self._is_managed_worktree_path(worktree_path):
-                resolved_worktree = self._resolve_path(worktree_path)
-                if resolved_worktree.exists():
-                    self._remove_worktree(
-                        path=resolved_worktree, branch=worktree_branch, force=True
-                    )
-                    if not resolved_worktree.exists():
-                        removed.append(str(resolved_worktree))
-            elif worktree_raw:
-                skipped.append(str(self._resolve_path(worktree_path)))
-
-        sandbox = self.omo_dir / "sandbox"
-        if sandbox.exists():
-            sandbox_branch = (
-                worktree_branch
-                if worktree_path is not None
-                and self._resolve_path(worktree_path) == self._resolve_path(sandbox)
-                else ""
-            )
-            self._remove_worktree(path=sandbox, branch=sandbox_branch, force=True)
-            if not sandbox.exists():
-                sandbox_path = str(self._resolve_path(sandbox))
-                if sandbox_path not in removed:
-                    removed.append(sandbox_path)
-
-        state["last_action"] = "cleanup"
-        state["pipeline"]["worktree_path"] = ""
-        state["pipeline"]["worktree_branch"] = ""
-        state["pipeline"]["current_stage"] = ""
-        self.save_state(state)
-        return {
-            "ok": True,
-            "command": "cleanup",
-            "removed_paths": removed,
-            "skipped_paths": skipped,
-        }
+        return run_cleanup_command(self)
