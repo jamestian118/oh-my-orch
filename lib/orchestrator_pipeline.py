@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 import sys
 from datetime import datetime
@@ -9,6 +10,8 @@ from pathlib import Path
 from typing import Any, Callable, Sequence
 from uuid import uuid4
 from zoneinfo import ZoneInfo
+
+from .run_registry import ensure_project_registry, write_run_registry
 
 _BJT = ZoneInfo("Asia/Shanghai")
 
@@ -217,6 +220,45 @@ def _persist_pipeline_outputs(
     state["pipeline"]["meta_file"] = str(meta_path)
     state["pipeline"]["latest_summary_file"] = str(latest_summary_path)
     state["pipeline"]["latest_meta_file"] = str(latest_meta_path)
+
+    project_registry_path = ensure_project_registry(
+        orch.root,
+        orch.state_path,
+        default_timezone="Asia/Shanghai",
+    )
+    project_registry_payload = json.loads(project_registry_path.read_text(encoding="utf-8"))
+    run_payload = {
+        "schema_version": 1,
+        "run_id": run_id,
+        "project_id": str(project_registry_payload.get("project_id", "")),
+        "kind": "pipeline",
+        "mode": mode,
+        "status": status,
+        "task": task,
+        "started_at": state["pipeline"].get("started_at", ""),
+        "finished_at": state["pipeline"].get("finished_at", ""),
+        "current_stage": state["pipeline"].get("current_stage", ""),
+        "completed_stages": list(state["pipeline"].get("completed_stages", [])),
+        "retry_count": state["pipeline"].get("retry_count", 0),
+        "worktree_path": str(worktree_path),
+        "worktree_branch": worktree_branch,
+        "error": error,
+        "summary_file": str(summary_path),
+        "meta_file": str(meta_path),
+    }
+    registry_artifacts = {
+        "pipeline-summary.md": str(summary_path),
+        "meta.json": str(meta_path),
+    }
+    registry_artifacts.update(artifacts)
+    write_run_registry(
+        orch.root,
+        kind="pipeline",
+        run_id=run_id,
+        run_payload=run_payload,
+        artifacts=registry_artifacts,
+        decisions=stage_results,
+    )
 
     return {
         "run_id": run_id,

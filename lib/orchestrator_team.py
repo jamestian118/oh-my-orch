@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+import json
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Callable, Sequence
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 from .agents import AgentRunResult
+from .run_registry import ensure_project_registry
 
 _BJT = ZoneInfo("Asia/Shanghai")
 
@@ -44,6 +47,108 @@ def _build_team_run_id(topic: str, slug: Callable[[str], str]) -> str:
     # 时间到秒便于阅读；附加短哈希降低同秒冲突概率。
     short_hash = uuid4().hex[:8]
     return f"{date_part}-{time_part}-{summary_part}-{short_hash}"
+
+
+def _registry_root(orch: Any) -> Path:
+    project_registry = ensure_project_registry(root=orch.root, state_path=orch.state_path)
+    root_path = Path(project_registry).parent
+    if not root_path.is_absolute():
+        root_path = (orch.root / root_path).resolve(strict=False)
+    root_path.mkdir(parents=True, exist_ok=True)
+    return root_path
+
+
+def _write_jsonl(path: Path, rows: Sequence[dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as handle:
+        for row in rows:
+            handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+
+def _persist_team_registry(
+    orch: Any,
+    *,
+    run_id: str,
+    mode: str,
+    status: str,
+    topic: str,
+    ran_at: str,
+    outputs: Sequence[dict[str, Any]],
+    summary_path: Path,
+    meta_path: Path,
+    viewpoints_ok: bool,
+    viewpoint_failures: Sequence[str],
+    agents_dir: Path,
+    team_agents: Sequence[str],
+) -> None:
+    registry_root = _registry_root(orch)
+    team_run_dir = registry_root / "runs" / "team" / run_id
+    run_file = team_run_dir / "run.json"
+    artifacts_file = team_run_dir / "artifacts.json"
+    decisions_file = team_run_dir / "decisions.jsonl"
+    latest_file = registry_root / "latest" / "team.json"
+
+    run_payload = {
+        "schema_version": 1,
+        "run_id": run_id,
+        "kind": "team",
+        "mode": mode,
+        "status": status,
+        "topic": topic,
+        "ran_at": ran_at,
+        "outputs_count": len(outputs),
+        "summary_file": str(summary_path),
+        "meta_file": str(meta_path),
+        "viewpoints_ok": viewpoints_ok,
+    }
+    artifacts_payload = {
+        "run_id": run_id,
+        "kind": "team",
+        "summary_file": str(summary_path),
+        "meta_file": str(meta_path),
+        "artifacts": {
+            "team-summary.md": str(summary_path),
+            "meta.json": str(meta_path),
+            "agents/*.md": [str(agents_dir / f"{agent}.md") for agent in team_agents],
+        },
+    }
+    decisions_payload = [
+        {
+            "ts": ran_at,
+            "run_id": run_id,
+            "kind": "team",
+            "decision": "viewpoint_validation",
+            "ok": viewpoints_ok,
+            "failure_count": len(viewpoint_failures),
+            "failures": list(viewpoint_failures),
+        },
+        {
+            "ts": ran_at,
+            "run_id": run_id,
+            "kind": "team",
+            "decision": "final_status",
+            "status": status,
+            "outputs_count": len(outputs),
+        },
+    ]
+    latest_payload = {
+        "schema_version": 1,
+        "run_id": run_id,
+        "kind": "team",
+        "mode": mode,
+        "status": status,
+        "ran_at": ran_at,
+        "run_file": str(run_file),
+        "artifacts_file": str(artifacts_file),
+        "decisions_file": str(decisions_file),
+        "summary_file": str(summary_path),
+        "meta_file": str(meta_path),
+    }
+
+    orch._write_json(run_file, run_payload)
+    orch._write_json(artifacts_file, artifacts_payload)
+    _write_jsonl(decisions_file, decisions_payload)
+    orch._write_json(latest_file, latest_payload)
 
 
 def run_team(
@@ -251,11 +356,14 @@ def run_team(
             }
         ]
     orch._write_text(latest_dir / "team-summary.md", summary_content)
+    team_ok = stage0.ok and viewpoints_ok and all(item["returncode"] == 0 for item in summary_steps)
+    run_status = "completed" if team_ok else "failed"
+    ran_at = utc_now()
     run_meta = {
         "run_id": run_id,
         "topic": topic,
         "mode": mode,
-        "ran_at": utc_now(),
+        "ran_at": ran_at,
         "stage0_ok": stage0.ok,
         "viewpoints_ok": viewpoints_ok,
         "viewpoint_failures": viewpoint_failures,
@@ -272,10 +380,25 @@ def run_team(
             "run_id": run_id,
             "topic": topic,
             "mode": mode,
-            "ran_at": run_meta["ran_at"],
+            "ran_at": ran_at,
             "summary_file": str(summary_path),
             "meta_file": str(meta_path),
         },
+    )
+    _persist_team_registry(
+        orch,
+        run_id=run_id,
+        mode=mode,
+        status=run_status,
+        topic=topic,
+        ran_at=ran_at,
+        outputs=outputs,
+        summary_path=summary_path,
+        meta_path=meta_path,
+        viewpoints_ok=viewpoints_ok,
+        viewpoint_failures=viewpoint_failures,
+        agents_dir=agents_dir,
+        team_agents=team_agents,
     )
 
     state = orch.load_state()
@@ -288,7 +411,6 @@ def run_team(
     state["team"]["run_dir"] = str(run_dir)
     state["team"]["summary_file"] = str(summary_path)
     orch.save_state(state)
-    team_ok = stage0.ok and viewpoints_ok and all(item["returncode"] == 0 for item in summary_steps)
     return {
         "ok": team_ok,
         "command": "team",
