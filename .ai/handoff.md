@@ -3,6 +3,47 @@
 > 规则：动态进度只写在这里；不要把动态内容写进 docs/ 或长期规范文件。
 
 ## 最新交接（追加在最上方）
+- Date：2026-02-27 21:33:02 (CST)
+- Branch：ai/20260227-phase0-upgrade
+- Commit：b2b9bb5
+- git status（摘要）：`M lib/integrations.py`、`M tests/test_step6_integrations.py`
+- 最小验证命令：
+  - `$HOME/Documents/Code/universal-harness-kit/scripts/agent-policy-stack --tool codex --cwd "$PWD" --strict --strict-profile harness`
+  - `pytest tests/test_step6_integrations.py -q`
+  - `./scripts/verify`
+  - `./scripts/secrets-check`
+- 关键输出摘录（key output excerpts）：
+  - `agent-policy-stack(strict) -> strict_result=pass`
+  - `pytest tests/test_step6_integrations.py -q -> 8 passed in 0.03s`
+  - `./scripts/verify -> [verify] OK`
+  - `pytest(full) -> 59 passed in 23.76s`
+  - `coverage gate -> Required test coverage of 75% reached. Total coverage: 80.92%`
+  - `./scripts/secrets-check -> [secrets-check] OK`
+  - `non-blocking noise -> verify 末尾仍出现 datetime.UTC traceback（exit code 仍为 0）`
+
+### Done
+- 完成 Phase 7 OMO lane：
+  - 7.4 OMO→CSM 集成改为 `MCP stdio` 优先调用（`csm.py mcp` + JSON-RPC over stdio），并保留 driver fallback 兼容路径。
+  - 7.7 在 `integrations.py` 增加 CSM 版本兼容校验（默认要求 `>=0.1.0`）；不兼容时返回可操作错误（升级命令 + 临时回退开关）。
+  - 7.10 OMO 侧最小路径参数化：
+    - `OMO_CODE_ROOT` 作为默认代码根目录基准（覆盖 `Documents/Code` 默认值）。
+    - `OMO_CSM_MCP_COMMAND` / `OMO_CSM_PYTHON_BIN` 参数化 MCP 启动命令，避免解释器与入口路径硬编码。
+- 协议变化（Protocol Change）：
+  - 旧协议：`driver` 注入（`python lib/csm_driver.py <json>`）。
+  - 新协议：默认 `auto` -> 优先 `MCP stdio`，失败或不可用时回退 `driver`。
+- 兼容策略（Compatibility）：
+  - `OMO_CSM_TRANSPORT=auto`（默认）：`mcp` 优先，失败自动回退。
+  - `OMO_CSM_TRANSPORT=mcp`：只走 MCP；版本不兼容或 MCP 不可用时 fail-fast。
+  - `OMO_CSM_TRANSPORT=driver`：强制旧路径。
+- 回滚点（Rollback Points）：
+  - 即时回滚（无代码变更）：`export OMO_CSM_TRANSPORT=driver`。
+  - 入口问题临时绕过：`export OMO_CSM_MCP_COMMAND="python3 /path/to/csm.py mcp"`。
+  - 版本不兼容临时绕过：先切 `driver`，再升级 CSM 后恢复 `auto/mcp`。
+
+### Next Steps（3-8 条，按优先级）
+1. 如需强制纯 MCP 路径，在 CI/运行环境中设置 `OMO_CSM_TRANSPORT=mcp` 并保持 CSM 版本门槛一致。
+2. 若要进一步降低兼容风险，可在后续补充一条 live 环境 smoke（真实 `csm.py mcp` 进程），覆盖 stdio 握手链路。
+
 - Date：2026-02-27 21:20:30 (CST)
 - Branch：ai/20260227-phase0-upgrade
 - Commit：5239448
