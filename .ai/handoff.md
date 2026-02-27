@@ -3,6 +3,30 @@
 > 规则：动态进度只写在这里；不要把动态内容写进 docs/ 或长期规范文件。
 
 ## 最新交接（追加在最上方）
+- Date：2026-02-27 20:57:12 (CST)
+- Branch：ai/20260227-phase0-upgrade
+- Commit：f183b52
+- git status（摘要）：`M .gitignore`、`M docs/scripts.md`、`M requirements-dev.txt`、`M scripts/test`、`?? tests/test_src_main_and_types.py`
+- 最小验证命令：`./scripts/verify`、`./scripts/secrets-check`
+- 关键输出摘录（key output excerpts）：
+  - `./scripts/verify -> [verify] OK`
+  - `coverage gate -> Required test coverage of 75% reached. Total coverage: 79.94%`
+  - `pytest -> 47 passed in 23.54s`
+  - `./scripts/secrets-check -> [secrets-check] OK`
+  - `non-blocking noise -> verify 末尾出现 datetime.UTC traceback（exit code 仍为 0）`
+
+### Done
+- 完成 Phase 4 lane 4.11/4.12：
+  - 引入 `pytest-cov` 并在 `scripts/test` 启用 coverage gate（`--cov-fail-under=75`）。
+  - 覆盖统计范围固定为 `lib + src + omo`，并输出 `term-missing + coverage.xml`。
+  - 新增 `tests/test_src_main_and_types.py`，覆盖 `src/main.py` 与 `src/types/boundaries.py`。
+  - 同步双语脚本文档 `docs/scripts.md`（test/verify 说明与 coverage 排障）。
+  - 更新 `.gitignore` 忽略 `.coverage`/`coverage.xml`，避免每次 verify 产生脏工作区。
+
+### Next Steps（3-8 条，按优先级）
+1. 提交本阶段改动（建议 message：`test: add coverage gate and src tests for phase4`）。
+2. 若要消除 verify 尾部 traceback，可后续修复 `scripts/verify` 的 `datetime.UTC` 兼容性（不影响当前 gate 结果）。
+
 - Date：2026-02-27 20:44:45 (CST)
 - Branch：ai/20260227-phase0-upgrade
 - Commit：3d067e5

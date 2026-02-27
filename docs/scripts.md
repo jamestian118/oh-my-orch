@@ -60,7 +60,9 @@ OMO_ENABLE_LIVE_SMOKE=1 ./scripts/verify
 - 静态检查代码
 
 ### test
-- 运行测试套件
+- 运行测试套件并启用 coverage gate（`>=75%`）
+- 当前参数：`--cov=lib --cov=src --cov=omo --cov-report=term-missing --cov-report=xml --cov-fail-under=75`
+- 产物：`coverage.xml`
 
 ### verify
 - 最小验证入口；先校验 `.harness` 存在，不存在则立即失败
@@ -164,7 +166,7 @@ OMO_ENABLE_LIVE_SMOKE=1 ./scripts/verify
 - 退出时输出日志路径
 
 ### troubleshooting
-- verify 失败：先看是哪一步失败（format/lint/test/arch-check/docs-check/secrets-check/gc/live-smoke），修复后重新运行 verify
+- verify 失败：先看是哪一步失败（format/lint/test/arch-check/docs-check/secrets-check/gc/live-smoke），若是 coverage gate 未达标，补测试后重新运行 verify
 - live-smoke 失败：先跑 `./scripts/live-smoke --dry-run` 区分 binary 问题与真实 live 路径问题，再决定是否开启 `OMO_ENABLE_LIVE_SMOKE=1`
 - secrets-check 误报：优先改为更精确规则或引入专用 secrets 扫描工具（仍通过 scripts/ 与 CI 入口统一调用）
 
@@ -230,7 +232,9 @@ OMO_ENABLE_LIVE_SMOKE=1 ./scripts/verify
 - Runs static code analysis
 
 ### test
-- Runs the test suite
+- Runs the test suite with a coverage gate (`>=75%`)
+- Current args: `--cov=lib --cov=src --cov=omo --cov-report=term-missing --cov-report=xml --cov-fail-under=75`
+- Artifact: `coverage.xml`
 
 ### verify
 - Minimal verification entrypoint; first checks `.harness`, and fails immediately if missing

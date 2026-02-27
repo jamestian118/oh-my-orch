@@ -2,7 +2,13 @@
 set -euo pipefail
 
 # scripts/test (python)
-# 说明：运行测试（pytest）
+# 说明：运行测试（pytest + coverage gate）
 
 source .venv/bin/activate
-python -m pytest -q
+python -m pytest -q \
+  --cov=lib \
+  --cov=src \
+  --cov=omo \
+  --cov-report=term-missing \
+  --cov-report=xml \
+  --cov-fail-under=75
