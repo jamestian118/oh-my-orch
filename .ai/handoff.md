@@ -3,6 +3,44 @@
 > 规则：动态进度只写在这里；不要把动态内容写进 docs/ 或长期规范文件。
 
 ## 最新交接（追加在最上方）
+- Date：2026-02-27 21:20:30 (CST)
+- Branch：ai/20260227-phase0-upgrade
+- Commit：5239448
+- git status（摘要）：`clean`
+- 最小验证命令：
+  - `$HOME/Documents/Code/universal-harness-kit/scripts/agent-policy-stack --tool codex --cwd "$PWD" --strict --strict-profile harness`
+  - `pytest tests/test_omo_cli.py -q`
+  - `./scripts/verify`
+  - `./scripts/secrets-check`
+- 关键输出摘录（key output excerpts）：
+  - `agent-policy-stack(strict) -> strict_result=pass`
+  - `pytest tests/test_omo_cli.py -q -> 10 passed in 0.02s`
+  - `./scripts/verify -> [verify] OK`
+  - `pytest(full) -> 55 passed in 23.60s`
+  - `coverage gate -> Required test coverage of 75% reached. Total coverage: 81.99%`
+  - `./scripts/secrets-check -> [secrets-check] OK`
+  - `non-blocking noise -> verify 末尾仍出现 datetime.UTC traceback（exit code 仍为 0）`
+
+### Done
+- 完成 Phase 6 OMO lane 6.1-6.3：
+  - 6.1 `_build_parser()` 增加 `description` + `epilog`，并在帮助信息中提供 3 个示例命令。
+  - 6.2 新增 `--output json|text`：
+    - 所有子命令支持 `--output`（默认 `json` 保持结构化输出）。
+    - `@agent` 快捷语法支持 `--output`。
+    - `text` 模式输出 `Field | Value` 人类可读表格，复杂字段按 pretty JSON 多行展示。
+  - 6.3 新增 `--version` flag：
+    - 输出格式 `omo <version>`。
+    - 版本解析优先 `importlib.metadata`，fallback 到 `pyproject.toml` 的 `project.version`。
+- 测试补齐：
+  - `tests/test_omo_cli.py` 新增 parser help 内容、text output、`@agent --output text`、`--version` 用例。
+  - 按 TDD 执行 RED/GREEN：先跑失败测试，再实现通过。
+- 双语文档同步：
+  - `README.md` 中英文 usage/flags/I/O 更新 `--output` 与 `--version`。
+
+### Next Steps（3-8 条，按优先级）
+1. 如需更强 text 可读性，可在后续迭代中为 `text` 模式增加“长值截断 + `--no-truncate` 开关”。
+2. 后续可把 `--output` 前移为顶层全局参数（支持 `omo --output text status`），当前实现为子命令级别与 `@agent` 级别。
+
 - Date：2026-02-27 21:09:58 (CST)
 - Branch：ai/20260227-phase0-upgrade
 - Commit：46430a5
