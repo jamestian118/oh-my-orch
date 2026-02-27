@@ -294,3 +294,7 @@
 ## 2026-02-27 Phase 7 follow-up（7.5 cross-ref）
 - 补充 OMO 对 CHB 快照契约文档引用：`$CHB_ROOT/docs/snapshot-schema.md`（中英 README 已同步）。
 - 目的：与 CSM 共享同一 snapshot contract，避免下游解析漂移。
+
+## 2026-02-27 Phase 8 OMO（8.7）
+- 新增 `CHANGELOG.md`（0.1.0 基线条目）。
+- 验证：strict/verify/secrets 全绿（见 `/tmp/phase8-oh-my-orch.log`）。
