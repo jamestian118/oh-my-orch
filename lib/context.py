@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import logging
 import re
 import subprocess
 from dataclasses import dataclass
 from typing import Callable
+
+from .logging_config import format_command
 
 AGENT_PROFILES: dict[str, dict[str, int]] = {
     "claude": {"window": 200_000, "overhead": 18_000},
@@ -17,6 +20,7 @@ SOFT_RATIO = 0.15
 HARD_RATIO = 0.25
 ABS_CAP = 50_000
 COMPRESS_TARGET = 5_000
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -187,8 +191,10 @@ class ContextManager:
         )
 
     def _default_compressor(self, prompt: str) -> str:
+        command = ["gemini", "-p", prompt]
+        LOGGER.debug("subprocess command: %s", format_command(command))
         completed = subprocess.run(
-            ["gemini", "-p", prompt],
+            command,
             capture_output=True,
             text=True,
             check=True,

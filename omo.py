@@ -4,20 +4,26 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import sys
 from typing import Any
 
+from lib.logging_config import configure_logging
 from lib.orchestrator import Orchestrator
+
+logger = logging.getLogger(__name__)
 
 
 def _print_json(payload: dict[str, Any]) -> None:
     print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
 
 
-def _parse_common_flags(tokens: list[str]) -> tuple[str, bool, bool, list[str]]:
+def _parse_common_flags(tokens: list[str]) -> tuple[str, bool, bool, bool, bool, list[str]]:
     cwd = "."
     dry_run = False
     no_auto_confirm = False
+    verbose = False
+    debug = False
     remaining: list[str] = []
 
     i = 0
@@ -32,6 +38,14 @@ def _parse_common_flags(tokens: list[str]) -> tuple[str, bool, bool, list[str]]:
             continue
         if token == "--no-auto-confirm":
             no_auto_confirm = True
+            i += 1
+            continue
+        if token in {"-v", "--verbose"}:
+            verbose = True
+            i += 1
+            continue
+        if token == "--debug":
+            debug = True
             i += 1
             continue
         if token == "--cwd":
@@ -52,12 +66,13 @@ def _parse_common_flags(tokens: list[str]) -> tuple[str, bool, bool, list[str]]:
             continue
         if token.startswith("-"):
             raise ValueError(
-                f"`@agent` 不支持参数 `{token}`。仅支持 `--cwd`/`--dry-run`/`--no-auto-confirm`；"
+                f"`@agent` 不支持参数 `{token}`。仅支持 `--cwd`/`--dry-run`/"
+                "`--no-auto-confirm`/`--verbose`/`-v`/`--debug`；"
                 "若 prompt 以 `-` 开头，请使用 `--` 分隔。"
             )
         remaining.append(token)
         i += 1
-    return cwd, dry_run, no_auto_confirm, remaining
+    return cwd, dry_run, no_auto_confirm, verbose, debug, remaining
 
 
 def _parse_at_agent(argv: list[str]) -> dict[str, Any] | None:
@@ -66,7 +81,7 @@ def _parse_at_agent(argv: list[str]) -> dict[str, Any] | None:
     agent = argv[0][1:].strip()
     if not agent:
         raise ValueError("agent 不能为空，例如 `@codex chat 实现功能`")
-    cwd, dry_run, no_auto_confirm, rest = _parse_common_flags(argv[1:])
+    cwd, dry_run, no_auto_confirm, verbose, debug, rest = _parse_common_flags(argv[1:])
     if rest and rest[0] in {
         "pipeline",
         "team",
@@ -95,11 +110,17 @@ def _parse_at_agent(argv: list[str]) -> dict[str, Any] | None:
         "cwd": cwd,
         "dry_run": dry_run,
         "no_auto_confirm": no_auto_confirm,
+        "verbose": verbose,
+        "debug": debug,
     }
 
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="omo")
+    parser.add_argument(
+        "-v", "--verbose", action="store_true", help="show stage-level progress logs"
+    )
+    parser.add_argument("--debug", action="store_true", help="show full subprocess commands")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     chat = subparsers.add_parser("chat", help="chat with one agent")
@@ -149,15 +170,35 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _make_orchestrator(cwd: str, dry_run: bool, no_auto_confirm: bool) -> Orchestrator:
-    return Orchestrator(root_dir=cwd, dry_run=dry_run, auto_confirm=not no_auto_confirm)
+def _make_orchestrator(
+    cwd: str,
+    dry_run: bool,
+    no_auto_confirm: bool,
+    verbose: bool = False,
+    debug: bool = False,
+) -> Orchestrator:
+    return Orchestrator(
+        root_dir=cwd,
+        dry_run=dry_run,
+        verbose=verbose,
+        debug=debug,
+        auto_confirm=not no_auto_confirm,
+    )
 
 
 def _dispatch(ns: argparse.Namespace) -> dict[str, Any]:
     command = ns.command
     dry_run = bool(getattr(ns, "dry_run", False))
     no_auto_confirm = bool(getattr(ns, "no_auto_confirm", False))
-    orch = _make_orchestrator(getattr(ns, "cwd", "."), dry_run, no_auto_confirm)
+    verbose = bool(getattr(ns, "verbose", False))
+    debug = bool(getattr(ns, "debug", False))
+    orch = _make_orchestrator(
+        getattr(ns, "cwd", "."),
+        dry_run,
+        no_auto_confirm,
+        verbose=verbose,
+        debug=debug,
+    )
 
     if command == "chat":
         return orch.chat(
@@ -201,13 +242,20 @@ def _resolve_exit_code(payload: dict[str, Any], *, ok_default: bool) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     args = list(argv) if argv is not None else sys.argv[1:]
+    bootstrap_verbose = any(token in {"-v", "--verbose"} for token in args)
+    bootstrap_debug = "--debug" in args
+    configure_logging(verbose=bootstrap_verbose, debug=bootstrap_debug)
+    logger.debug("omo bootstrap argv=%s", args)
     try:
         at_call = _parse_at_agent(args)
         if at_call is not None:
+            configure_logging(verbose=at_call["verbose"], debug=at_call["debug"])
             orch = _make_orchestrator(
                 at_call["cwd"],
                 at_call["dry_run"],
                 at_call["no_auto_confirm"],
+                verbose=at_call["verbose"],
+                debug=at_call["debug"],
             )
             payload = orch.chat(
                 agent=at_call["agent"],
@@ -219,6 +267,7 @@ def main(argv: list[str] | None = None) -> int:
 
         parser = _build_parser()
         ns = parser.parse_args(args)
+        configure_logging(verbose=bool(ns.verbose), debug=bool(ns.debug))
         payload = _dispatch(ns)
         _print_json(payload)
         return _resolve_exit_code(payload, ok_default=True)

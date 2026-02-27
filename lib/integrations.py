@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import subprocess
 import sys
@@ -15,7 +16,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .logging_config import format_command
+
 TOOL_SLUGS = {"claude", "codex", "gemini"}
+LOGGER = logging.getLogger(__name__)
 
 HOME_CODE_ROOT = Path.home() / "Documents" / "Code"
 UHK_ROOT = Path(os.environ.get("OMO_UHK_ROOT", str(HOME_CODE_ROOT / "universal-harness-kit")))
@@ -57,8 +61,10 @@ def _safe_json_load(text: str) -> dict[str, Any]:
 
 def _repo_root(project_root: Path) -> Path:
     try:
+        command = ["git", "-C", str(project_root), "rev-parse", "--show-toplevel"]
+        LOGGER.debug("subprocess command: %s (cwd=%s)", format_command(command), project_root)
         proc = subprocess.run(
-            ["git", "-C", str(project_root), "rev-parse", "--show-toplevel"],
+            command,
             capture_output=True,
             text=True,
             check=False,
@@ -87,18 +93,20 @@ class UHKIntegration:
                 data={"strict_result": "fail"},
                 error=f"missing script: {self.policy_script}",
             )
+        command = [
+            str(self.policy_script),
+            "--tool",
+            "codex",
+            "--cwd",
+            target_cwd,
+            "--strict",
+            "--strict-profile",
+            strict_profile,
+            "--json",
+        ]
+        LOGGER.debug("subprocess command: %s (cwd=%s)", format_command(command), target_cwd)
         proc = subprocess.run(
-            [
-                str(self.policy_script),
-                "--tool",
-                "codex",
-                "--cwd",
-                target_cwd,
-                "--strict",
-                "--strict-profile",
-                strict_profile,
-                "--json",
-            ],
+            command,
             capture_output=True,
             text=True,
             check=False,
@@ -120,8 +128,10 @@ class UHKIntegration:
             return IntegrationResult(
                 ok=False, data={}, error=f"missing verify script: {verify_script}"
             )
+        command = [str(verify_script)]
+        LOGGER.debug("subprocess command: %s (cwd=%s)", format_command(command), target)
         proc = subprocess.run(
-            [str(verify_script)],
+            command,
             cwd=str(target),
             capture_output=True,
             text=True,
@@ -160,8 +170,14 @@ class CSMIntegration:
             "action": action,
             **payload,
         }
+        command = [sys.executable, str(CSM_DRIVER), json.dumps(args)]
+        LOGGER.debug(
+            "subprocess command: %s (cwd=%s)",
+            format_command(command),
+            self.csm_root,
+        )
         proc = subprocess.run(
-            [sys.executable, str(CSM_DRIVER), json.dumps(args)],
+            command,
             capture_output=True,
             text=True,
             check=False,

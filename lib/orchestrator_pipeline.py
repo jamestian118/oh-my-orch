@@ -4,19 +4,23 @@ from __future__ import annotations
 
 import fcntl
 import json
+import logging
 import os
 import re
 import sys
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from time import perf_counter
 from typing import Any, Callable, Sequence
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
+from .logging_config import stderr_preview
 from .run_registry import ensure_project_registry, write_run_registry
 
 _BJT = ZoneInfo("Asia/Shanghai")
+LOGGER = logging.getLogger(__name__)
 
 
 def _readable_keywords(text: str) -> str:
@@ -197,6 +201,111 @@ def _sync_pipeline_artifacts(
     return materialized
 
 
+def _safe_stage_slug(stage: str) -> str:
+    slug = re.sub(r"[^a-zA-Z0-9_.-]+", "-", stage).strip("-").lower()
+    return slug or "stage"
+
+
+def _normalize_command(raw: Any) -> list[str]:
+    if isinstance(raw, (list, tuple)):
+        return [str(item) for item in raw]
+    if raw is None:
+        return []
+    return [str(raw)]
+
+
+def _persist_stage_agent_runs(
+    run_dir: Path,
+    *,
+    stage_entry: dict[str, Any],
+    stage_index: int,
+    stage_total: int,
+) -> str | None:
+    details = stage_entry.get("details", {})
+    if not isinstance(details, dict):
+        return None
+
+    raw_runs = details.get("agent_runs")
+    if not isinstance(raw_runs, list) or not raw_runs:
+        return None
+
+    normalized_runs: list[dict[str, Any]] = []
+    for raw in raw_runs:
+        if not isinstance(raw, dict):
+            continue
+        try:
+            returncode = int(raw.get("returncode", 0) or 0)
+        except (TypeError, ValueError):
+            returncode = 0
+        stderr_raw = raw.get("stderr")
+        if stderr_raw is None:
+            stderr_raw = raw.get("stderr_preview", "")
+        preview, truncated = stderr_preview(str(stderr_raw or ""), limit=500)
+        normalized_runs.append(
+            {
+                "agent": str(raw.get("agent", "") or ""),
+                "mode": str(raw.get("mode", "") or ""),
+                "cwd": str(raw.get("cwd", "") or ""),
+                "command": _normalize_command(raw.get("command")),
+                "returncode": returncode,
+                "stderr_preview": preview,
+                "stderr_truncated": bool(raw.get("stderr_truncated")) or truncated,
+            }
+        )
+
+    if not normalized_runs:
+        return None
+
+    stage_name = str(stage_entry.get("stage", "unknown"))
+    agents_dir = run_dir / "agents"
+    agents_dir.mkdir(parents=True, exist_ok=True)
+    retry = stage_entry.get("retry")
+    retry_suffix = ""
+    if isinstance(retry, int) and retry > 0:
+        retry_suffix = f"-retry{retry}"
+    output_file = (
+        agents_dir / f"{stage_index:02d}-{_safe_stage_slug(stage_name)}{retry_suffix}.json"
+    )
+    payload = {
+        "stage": stage_name,
+        "stage_index": stage_index,
+        "stage_total": stage_total,
+        "ok": bool(stage_entry.get("ok", False)),
+        "duration_sec": round(float(stage_entry.get("duration_sec", 0.0) or 0.0), 3),
+        "agent_results": normalized_runs,
+    }
+    output_file.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    details["agent_result_file"] = str(output_file)
+    return str(output_file)
+
+
+def _collect_stage_durations(
+    stage_results: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], float]:
+    durations: list[dict[str, Any]] = []
+    total = 0.0
+    for item in stage_results:
+        if not isinstance(item, dict):
+            continue
+        raw_duration = item.get("duration_sec")
+        if not isinstance(raw_duration, (int, float)):
+            continue
+        duration = round(float(raw_duration), 3)
+        total += duration
+        duration_row: dict[str, Any] = {
+            "stage": str(item.get("stage", "unknown")),
+            "duration_sec": duration,
+            "ok": bool(item.get("ok", False)),
+        }
+        if "retry" in item:
+            duration_row["retry"] = int(item.get("retry", 0) or 0)
+        durations.append(duration_row)
+    return durations, round(total, 3)
+
+
 def _build_pipeline_summary(
     *,
     run_id: str,
@@ -321,6 +430,7 @@ def _persist_pipeline_outputs(
         "stage-results.json": str(stage_results_path),
         "final-gate.json": str(final_gate_path),
     }
+    stage_durations, pipeline_duration_sec = _collect_stage_durations(stage_results)
 
     meta_payload = {
         "run_id": run_id,
@@ -333,7 +443,10 @@ def _persist_pipeline_outputs(
         "worktree_branch": worktree_branch,
         "error": error,
         "stage_results": stage_results,
+        "stage_durations": stage_durations,
+        "pipeline_duration_sec": pipeline_duration_sec,
         "artifacts": artifacts,
+        "agents_dir": str(run_dir / "agents"),
         "decisions_dir": str(decisions_dir),
         "decision_files": decision_files,
         "state_file": str(orch.state_path),
@@ -552,11 +665,15 @@ def run_pipeline(
     start_index = 0
     if resume and state["pipeline"]["current_stage"] in pipeline_stages:
         start_index = pipeline_stages.index(state["pipeline"]["current_stage"])
+    total_stages = len(pipeline_stages)
 
     try:
         for index, stage in enumerate(pipeline_stages[start_index:], start=start_index):
             state["pipeline"]["current_stage"] = stage
             orch.save_state(state)
+            stage_no = index + 1
+            LOGGER.info("[stage %s/%s] %s started", stage_no, total_stages, stage)
+            stage_started = perf_counter()
 
             if stage == "stage0_project_brief":
                 result = orch._stage0_project_brief(task, run_dry=run_dry, cwd=orch.root)
@@ -652,14 +769,33 @@ def run_pipeline(
                     if review_result.ok:
                         break
                     if attempt < orch.max_review_loops:
+                        retry_started = perf_counter()
                         fix_result = orch._stage4_codex_fix(run_dry=run_dry, cwd=worktree_path)
-                        stage_results.append(
-                            {
-                                "stage": fix_result.stage,
-                                "ok": fix_result.ok,
-                                "details": fix_result.details,
-                                "retry": attempt + 1,
-                            }
+                        retry_entry = {
+                            "stage": fix_result.stage,
+                            "ok": fix_result.ok,
+                            "details": fix_result.details,
+                            "retry": attempt + 1,
+                            "duration_sec": round(perf_counter() - retry_started, 3),
+                        }
+                        stage_results.append(retry_entry)
+                        agent_result_file = _persist_stage_agent_runs(
+                            run_dir,
+                            stage_entry=retry_entry,
+                            stage_index=stage_no,
+                            stage_total=total_stages,
+                        )
+                        if agent_result_file:
+                            retry_entry["agent_result_file"] = agent_result_file
+                            retry_entry["details"]["agent_result_file"] = agent_result_file
+                        LOGGER.info(
+                            "[stage %s/%s] %s retry-%s %s (%.3fs)",
+                            stage_no,
+                            total_stages,
+                            fix_result.stage,
+                            attempt + 1,
+                            "PASS" if fix_result.ok else "FAIL",
+                            retry_entry["duration_sec"],
                         )
                 if review_result is None:
                     review_result = stage_result_cls(stage, False, {"reason": "no review result"})
@@ -667,9 +803,32 @@ def run_pipeline(
             else:
                 result = stage_result_cls(stage, False, {"error": "unknown stage"})
 
-            stage_results.append(
-                {"stage": result.stage, "ok": result.ok, "details": result.details}
+            stage_duration = round(perf_counter() - stage_started, 3)
+            stage_entry = {
+                "stage": result.stage,
+                "ok": result.ok,
+                "details": result.details,
+                "duration_sec": stage_duration,
+            }
+            stage_results.append(stage_entry)
+            agent_result_file = _persist_stage_agent_runs(
+                run_dir,
+                stage_entry=stage_entry,
+                stage_index=stage_no,
+                stage_total=total_stages,
             )
+            if agent_result_file:
+                stage_entry["agent_result_file"] = agent_result_file
+                stage_entry["details"]["agent_result_file"] = agent_result_file
+            LOGGER.info(
+                "[stage %s/%s] %s %s (%.3fs)",
+                stage_no,
+                total_stages,
+                stage,
+                "PASS" if result.ok else "FAIL",
+                stage_duration,
+            )
+
             if result.ok:
                 if stage not in state["pipeline"]["completed_stages"]:
                     state["pipeline"]["completed_stages"].append(stage)

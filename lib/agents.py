@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping, Sequence
+
+from .logging_config import format_command
 
 SUPPORTED_AGENT_TOOLS = ("claude", "codex", "gemini")
 
@@ -15,6 +18,8 @@ _NON_INTERACTIVE_PREFIX = {
     "codex": ("exec",),
     "gemini": ("-p",),
 }
+
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -141,6 +146,11 @@ class CLIAgent:
             )
 
         try:
+            LOGGER.debug(
+                "subprocess command: %s (cwd=%s)",
+                format_command(command),
+                self.cwd or ".",
+            )
             completed = subprocess.run(
                 command,
                 cwd=self.cwd,

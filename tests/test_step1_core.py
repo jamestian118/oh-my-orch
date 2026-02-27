@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import subprocess
 
 import pytest
@@ -74,3 +75,24 @@ def test_cli_agent_timeout_converts_bytes_output(monkeypatch) -> None:
     assert result.returncode == 124
     assert result.stdout == "partial-bytes"
     assert "timeout after 1s" in result.stderr
+
+
+def test_cli_agent_debug_logs_full_subprocess_command(monkeypatch, caplog) -> None:
+    agent = CLIAgent("codex", binary="codex")
+
+    def fake_run(*args, **kwargs):
+        _ = args, kwargs
+        return subprocess.CompletedProcess(
+            ["codex", "exec", "hello", "--model", "gpt-5"],
+            returncode=0,
+            stdout="ok",
+            stderr="",
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    with caplog.at_level(logging.DEBUG):
+        result = agent.run_non_interactive("hello", extra_args=["--model", "gpt-5"], dry_run=False)
+
+    assert result.returncode == 0
+    assert "subprocess command: codex exec hello --model gpt-5" in caplog.text

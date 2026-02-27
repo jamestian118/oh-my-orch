@@ -9,7 +9,7 @@ from pathlib import Path
 
 import omo
 from lib.agents import AgentRunResult
-from lib.orchestrator import Orchestrator
+from lib.orchestrator import Orchestrator, StageResult
 
 
 def test_pipeline_dry_run_creates_contract_files_and_state(tmp_path) -> None:
@@ -44,6 +44,23 @@ def test_pipeline_dry_run_creates_contract_files_and_state(tmp_path) -> None:
     meta = json.loads((run_dir / "meta.json").read_text(encoding="utf-8"))
     assert meta["status"] == "completed"
     assert meta["run_id"] == run_dir.name
+    assert isinstance(meta["stage_durations"], list)
+    assert len(meta["stage_durations"]) == 6
+    for item in meta["stage_durations"]:
+        assert "stage" in item
+        assert "duration_sec" in item
+        assert item["duration_sec"] >= 0
+
+    agents_dir = run_dir / "agents"
+    assert agents_dir.exists()
+    stage2_files = list(agents_dir.glob("*stage2_codex_execute.json"))
+    assert stage2_files
+    stage2_payload = json.loads(stage2_files[0].read_text(encoding="utf-8"))
+    assert stage2_payload["stage"] == "stage2_codex_execute"
+    assert stage2_payload["stage_index"] == 3
+    assert stage2_payload["stage_total"] == 6
+    assert stage2_payload["agent_results"][0]["returncode"] == 0
+    assert len(stage2_payload["agent_results"][0]["stderr_preview"]) <= 500
 
     state = json.loads((tmp_path / ".omo" / "pipeline-state.json").read_text(encoding="utf-8"))
     assert state["pipeline"]["status"] == "completed"
@@ -259,3 +276,54 @@ def test_agent_chat_command_writes_history_in_dry_run(tmp_path, monkeypatch, cap
     assert first["agent"] == "codex"
     assert first["role"] == "user"
     assert second["role"] == "assistant"
+
+
+def test_pipeline_agent_stderr_preview_is_capped_to_500(tmp_path, monkeypatch) -> None:
+    orch = Orchestrator(root_dir=tmp_path, dry_run=True)
+
+    def fake_stage2(
+        self,
+        *,
+        summary: str,
+        run_dry: bool,
+        cwd: Path,
+    ) -> StageResult:
+        _ = summary, run_dry
+        return StageResult(
+            "stage2_codex_execute",
+            True,
+            {
+                "cwd": str(cwd),
+                "returncode": 13,
+                "agent_runs": [
+                    {
+                        "agent": "codex",
+                        "mode": "interactive",
+                        "cwd": str(cwd),
+                        "command": ["codex", "exec", "run"],
+                        "returncode": 13,
+                        "stderr": "E" * 700,
+                    }
+                ],
+            },
+        )
+
+    monkeypatch.setattr(Orchestrator, "_stage2_codex_execute", fake_stage2)
+
+    result = orch.pipeline(task="stderr preview cap", dry_run=True)
+    run_dir = Path(result["run_dir"])
+
+    stage2_files = list((run_dir / "agents").glob("*stage2_codex_execute.json"))
+    assert stage2_files
+    stage2_payload = json.loads(stage2_files[0].read_text(encoding="utf-8"))
+    preview = stage2_payload["agent_results"][0]["stderr_preview"]
+    assert len(preview) == 500
+    assert stage2_payload["agent_results"][0]["stderr_truncated"] is True
+
+
+def test_pipeline_verbose_logs_stage_progress(tmp_path, caplog) -> None:
+    exit_code = omo.main(["-v", "pipeline", "日志可观测性", "--cwd", str(tmp_path), "--dry-run"])
+
+    assert exit_code == 0
+    assert "[stage 1/6]" in caplog.text
+    assert "[stage 6/6]" in caplog.text

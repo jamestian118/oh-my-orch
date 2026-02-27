@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import shutil
 import subprocess
@@ -23,6 +24,7 @@ from .agents import AgentRunResult, CLIAgent
 from .bus import MessageBus
 from .context import ContextManager
 from .integrations import IntegrationHub, build_integrations
+from .logging_config import format_command, stderr_preview
 from .orchestrator_pipeline import (
     run_cleanup as run_cleanup_command,
 )
@@ -51,6 +53,7 @@ ARTIFACT_PATHS = {
 
 TEAM_AGENTS = ("claude", "codex", "gemini")
 _BJT = ZoneInfo("Asia/Shanghai")
+LOGGER = logging.getLogger(__name__)
 
 
 def _utc_now() -> str:
@@ -86,6 +89,8 @@ class StageResult:
 class Orchestrator:
     root_dir: str | Path = "."
     dry_run: bool = False
+    verbose: bool = False
+    debug: bool = False
     integrations: IntegrationHub | None = None
     max_review_loops: int = 2
     auto_confirm: bool = True
@@ -270,6 +275,40 @@ class Orchestrator:
             encoding="utf-8",
         )
 
+    def _run_subprocess(
+        self,
+        command: list[str],
+        *,
+        cwd: Path | str | None = None,
+        capture_output: bool = True,
+        check: bool = False,
+    ) -> subprocess.CompletedProcess[str]:
+        target_cwd = str(cwd) if cwd is not None else None
+        LOGGER.debug(
+            "subprocess command: %s (cwd=%s)",
+            format_command(command),
+            target_cwd or ".",
+        )
+        return subprocess.run(
+            command,
+            cwd=target_cwd,
+            capture_output=capture_output,
+            text=True,
+            check=check,
+        )
+
+    def _agent_run_record(self, *, agent: str, result: AgentRunResult) -> dict[str, Any]:
+        preview, truncated = stderr_preview(result.stderr, limit=500)
+        return {
+            "agent": agent,
+            "mode": result.mode,
+            "cwd": result.cwd,
+            "command": list(result.command),
+            "returncode": result.returncode,
+            "stderr_preview": preview,
+            "stderr_truncated": truncated,
+        }
+
     def _fallback_project_brief(self, task: str) -> str:
         return (
             "# Project Brief\n\n"
@@ -352,11 +391,8 @@ class Orchestrator:
         if sandbox.exists():
             self._remove_worktree(path=sandbox, branch="", force=True)
 
-        proc = subprocess.run(
+        proc = self._run_subprocess(
             ["git", "-C", str(self.root), "worktree", "add", str(sandbox), "-b", branch],
-            capture_output=True,
-            text=True,
-            check=False,
         )
         if proc.returncode != 0:
             raise RuntimeError(f"git worktree add failed: {proc.stderr.strip()}")
@@ -371,23 +407,17 @@ class Orchestrator:
             cmd = ["git", "-C", str(self.root), "worktree", "remove", str(managed_path)]
             if force:
                 cmd.append("--force")
-            proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+            proc = self._run_subprocess(cmd)
             if proc.returncode != 0 and force:
                 shutil.rmtree(managed_path, ignore_errors=True)
         if self._is_managed_worktree_branch(branch):
-            subprocess.run(
+            self._run_subprocess(
                 ["git", "-C", str(self.root), "branch", "-D", branch],
-                capture_output=True,
-                text=True,
-                check=False,
             )
 
     def _merge_worktree_branch(self, branch: str) -> tuple[bool, str]:
-        proc = subprocess.run(
+        proc = self._run_subprocess(
             ["git", "-C", str(self.root), "merge", "--ff-only", branch],
-            capture_output=True,
-            text=True,
-            check=False,
         )
         ok = proc.returncode == 0
         return ok, (proc.stdout + proc.stderr).strip()
@@ -417,10 +447,15 @@ class Orchestrator:
         )
         content = result.stdout.strip() or self._fallback_project_brief(task)
         self._write_text(path, content)
+        agent_record = self._agent_run_record(agent="gemini", result=result)
         return StageResult(
             "stage0_project_brief",
             result.returncode == 0,
-            {"path": str(path), "returncode": result.returncode},
+            {
+                "path": str(path),
+                "returncode": result.returncode,
+                "agent_runs": [agent_record],
+            },
         )
 
     def _stage1_exec_plan(self, task: str, *, run_dry: bool, cwd: Path) -> StageResult:
@@ -450,6 +485,7 @@ class Orchestrator:
         resume_code = 0
         resumed = False
         resume_skipped = ""
+        agent_runs = [self._agent_run_record(agent="claude", result=init_result)]
         if session_id and sys.stdin.isatty():
             resume = self._run_agent(
                 agent="claude",
@@ -461,6 +497,7 @@ class Orchestrator:
             )
             resume_code = resume.returncode
             resumed = True
+            agent_runs.append(self._agent_run_record(agent="claude", result=resume))
         elif session_id:
             resume_skipped = "non-interactive shell, skipped claude --resume"
         if not path.exists():
@@ -477,6 +514,7 @@ class Orchestrator:
                 "returncode": init_result.returncode,
                 "resumed": resumed,
                 "resume_skipped_reason": resume_skipped,
+                "agent_runs": agent_runs,
             },
         )
 
@@ -502,7 +540,11 @@ class Orchestrator:
         return StageResult(
             "stage2_codex_execute",
             result.returncode == 0,
-            {"cwd": str(cwd), "returncode": result.returncode},
+            {
+                "cwd": str(cwd),
+                "returncode": result.returncode,
+                "agent_runs": [self._agent_run_record(agent="codex", result=result)],
+            },
         )
 
     def _stage3_gemini_review(self, *, run_dry: bool, cwd: Path) -> StageResult:
@@ -528,7 +570,11 @@ class Orchestrator:
         return StageResult(
             "stage3_gemini_review",
             result.returncode == 0,
-            {"path": str(path), "returncode": result.returncode},
+            {
+                "path": str(path),
+                "returncode": result.returncode,
+                "agent_runs": [self._agent_run_record(agent="gemini", result=result)],
+            },
         )
 
     def _stage4_codex_fix(self, *, run_dry: bool, cwd: Path) -> StageResult:
@@ -543,7 +589,11 @@ class Orchestrator:
         return StageResult(
             "stage4_codex_fix",
             result.returncode == 0,
-            {"cwd": str(cwd), "returncode": result.returncode},
+            {
+                "cwd": str(cwd),
+                "returncode": result.returncode,
+                "agent_runs": [self._agent_run_record(agent="codex", result=result)],
+            },
         )
 
     def _stage5_final_review(self, *, run_dry: bool, cwd: Path) -> StageResult:
@@ -571,6 +621,7 @@ class Orchestrator:
                 "verify_ok": verify_result.ok,
                 "verify_exit_code": verify_result.exit_code,
                 "review_returncode": review_result.returncode,
+                "agent_runs": [self._agent_run_record(agent="claude", result=review_result)],
             },
         )
 

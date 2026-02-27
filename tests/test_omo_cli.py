@@ -14,6 +14,8 @@ class _StubOrchestrator:
     cwd: str
     dry_run: bool
     no_auto_confirm: bool
+    verbose: bool = False
+    debug: bool = False
     calls: list[dict[str, Any]] = field(default_factory=list)
 
     def pipeline(
@@ -70,8 +72,20 @@ class _StubOrchestrator:
 def _install_stub_orchestrator(monkeypatch) -> list[_StubOrchestrator]:
     instances: list[_StubOrchestrator] = []
 
-    def _factory(cwd: str, dry_run: bool, no_auto_confirm: bool) -> _StubOrchestrator:
-        stub = _StubOrchestrator(cwd=cwd, dry_run=dry_run, no_auto_confirm=no_auto_confirm)
+    def _factory(
+        cwd: str,
+        dry_run: bool,
+        no_auto_confirm: bool,
+        verbose: bool = False,
+        debug: bool = False,
+    ) -> _StubOrchestrator:
+        stub = _StubOrchestrator(
+            cwd=cwd,
+            dry_run=dry_run,
+            no_auto_confirm=no_auto_confirm,
+            verbose=verbose,
+            debug=debug,
+        )
         instances.append(stub)
         return stub
 
@@ -185,3 +199,43 @@ def test_main_prefers_payload_exit_code(monkeypatch, capsys) -> None:
     assert exit_code == 42
     assert payload["ok"] is True
     assert payload["exit_code"] == 42
+
+
+def test_global_verbose_and_debug_flags_forwarded(monkeypatch, capsys) -> None:
+    instances = _install_stub_orchestrator(monkeypatch)
+
+    exit_code = omo.main(
+        [
+            "-v",
+            "--debug",
+            "pipeline",
+            "优化",
+            "日志",
+            "--cwd",
+            "/tmp/repo",
+            "--dry-run",
+            "--stop-after",
+            "1",
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    payload = json.loads(captured.out)
+    assert payload["ok"] is True
+    assert payload["command"] == "pipeline"
+
+    assert len(instances) == 1
+    stub = instances[0]
+    assert stub.cwd == "/tmp/repo"
+    assert stub.verbose is True
+    assert stub.debug is True
+    assert stub.calls == [
+        {
+            "command": "pipeline",
+            "task": "优化 日志",
+            "dry_run": True,
+            "stop_after": 1,
+            "resume": False,
+        }
+    ]

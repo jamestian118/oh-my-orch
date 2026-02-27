@@ -33,6 +33,7 @@ python omo.py chat codex "执行重构计划" --dry-run
 
 # Pipeline 模式
 python omo.py pipeline "给项目添加用户认证" --dry-run
+python omo.py -v pipeline "给项目添加用户认证" --dry-run
 
 # Team 模式
 python omo.py team "微服务还是单体" --dry-run
@@ -58,15 +59,19 @@ python omo.py compress --target-agent gemini --max-chars 2000 --dry-run
 
 # 真实模式（需要本机 CLI 与依赖就绪）
 python omo.py pipeline "接入 SSO 登录"
+python omo.py -v --debug pipeline "接入 SSO 登录"
 ```
 
 #### I/O
 - 输入：CLI 参数（任务描述、模式、`--dry-run`、`--stop-after` 等）
 - 输出：标准 JSON 到 stdout（便于管道/自动化消费）
+- `--verbose/-v` 时输出 pipeline stage 进度到 stderr（例如 `[stage 2/6] ...`）
+- `--debug` 时额外输出完整 subprocess 命令（stderr）
 - 状态文件：`.omo/pipeline-state.json`
 - 会话文件：`.omo/session.jsonl`、`.omo/chat-history.jsonl`
 - 关键产物（兼容入口）：`.ai/project-brief.md`、`.ai/exec-plan.md`、`.ai/review.md`
 - Pipeline 产物目录：`.ai/pipeline/runs/<run-id>/`（每次运行新目录；`run-id` 命名为“日期-时间-梗概-短哈希”：`YYYYMMDD-HHMMSS-<summary>-<short-hash>`，时间为北京时间 `Asia/Shanghai`；含 `project-brief.md`、`exec-plan.md`、`review.md`、`pipeline-summary.md`、`meta.json`）
+- Pipeline agent 结果目录：`.ai/pipeline/runs/<run-id>/agents/`（每个 stage 一个 JSON，记录 agent `returncode` 与 `stderr` 前 500 字符）
 - Pipeline 最新快照：`.ai/pipeline/latest/`（含 `pipeline-summary.md`、`run.json`）
 - Pipeline decisions artifacts：`.omo/runs/pipeline/<run-id>/decisions.jsonl`（按 stage 记录决策；latest pointer 在 `.omo/latest/pipeline.json` 的 `decisions_file` 字段）
 - Pipeline 并发防护：`.omo/pipeline.lock`（`fcntl.flock` 互斥锁）与 `.omo/pipeline.pid`（运行中 PID + run_id 元数据）
@@ -79,6 +84,8 @@ python omo.py pipeline "接入 SSO 登录"
 
 #### flags
 - `-h, --help`：顶层命令和各子命令都支持帮助信息
+- `-v, --verbose`：顶层全局 flag，输出 stage 级进度日志
+- `--debug`：顶层全局 flag，输出完整 subprocess 命令（包含 agent/gemini/git 调用）
 - `--cwd <path>`：`@agent` 快捷语法与全部子命令支持
 - `--dry-run`：`chat`、`pipeline`、`team`、`compress`、`resume` 与 `@agent` 支持
 - `--no-auto-confirm`：`chat`、`pipeline`、`team`、`resume` 与 `@agent` 支持
@@ -93,6 +100,7 @@ python omo.py pipeline "接入 SSO 登录"
   `$HOME/Documents/Code/universal-harness-kit/scripts/agent-policy-stack --tool codex --cwd "$PWD" --strict --strict-profile harness`
 - `pipeline already running`：说明当前目录已有 pipeline run 持有锁；检查 `.omo/pipeline.pid` 的 `pid/run_id`，等待前一任务结束后重试
 - 真实 CLI 调用失败：先验证 `claude/codex/gemini` 在当前 shell 可执行并已登录，再重跑命令
+- 需要定位外部命令问题：在命令前加 `--debug`（例如 `python omo.py --debug pipeline "..."`）查看完整 subprocess 命令
 - 需要快速清理残留 worktree：执行 `python omo.py cleanup`
 
 ---
@@ -130,6 +138,7 @@ python omo.py chat codex "Execute the refactor plan" --dry-run
 
 # Pipeline mode
 python omo.py pipeline "Add user authentication" --dry-run
+python omo.py -v pipeline "Add user authentication" --dry-run
 
 # Team mode
 python omo.py team "Microservice vs monolith?" --dry-run
@@ -155,15 +164,19 @@ python omo.py compress --target-agent gemini --max-chars 2000 --dry-run
 
 # Live mode (requires working CLIs and deps)
 python omo.py pipeline "Integrate SSO login"
+python omo.py -v --debug pipeline "Integrate SSO login"
 ```
 
 #### I/O
 - Input: CLI args (task text, mode, `--dry-run`, `--stop-after`, etc.)
 - Output: JSON payload to stdout
+- With `--verbose/-v`, pipeline stage progress is emitted to stderr (for example `[stage 2/6] ...`)
+- With `--debug`, full subprocess commands are emitted to stderr
 - State files: `.omo/pipeline-state.json`
 - Session files: `.omo/session.jsonl`, `.omo/chat-history.jsonl`
 - Key artifacts (compat paths): `.ai/project-brief.md`, `.ai/exec-plan.md`, `.ai/review.md`
 - Pipeline artifacts: `.ai/pipeline/runs/<run-id>/` (new directory per run; `run-id` format `YYYYMMDD-HHMMSS-<summary>-<short-hash>` in Beijing time `Asia/Shanghai`; includes `project-brief.md`, `exec-plan.md`, `review.md`, `pipeline-summary.md`, `meta.json`)
+- Pipeline agent result artifacts: `.ai/pipeline/runs/<run-id>/agents/` (one JSON per stage, including agent `returncode` and first 500 chars of `stderr`)
 - Latest pipeline snapshot: `.ai/pipeline/latest/` (contains `pipeline-summary.md`, `run.json`)
 - Pipeline decisions artifacts: `.omo/runs/pipeline/<run-id>/decisions.jsonl` (stage-level decisions; latest pointer is the `decisions_file` field in `.omo/latest/pipeline.json`)
 - Pipeline concurrency guard: `.omo/pipeline.lock` (`fcntl.flock` mutex) and `.omo/pipeline.pid` (active PID + run_id metadata)
@@ -176,6 +189,8 @@ python omo.py pipeline "Integrate SSO login"
 
 #### flags
 - `-h, --help`: available on the top-level command and every subcommand
+- `-v, --verbose`: top-level global flag to print stage-level progress logs
+- `--debug`: top-level global flag to print full subprocess commands (agent/gemini/git invocations)
 - `--cwd <path>`: supported by `@agent` shorthand and all subcommands
 - `--dry-run`: supported by `chat`, `pipeline`, `team`, `compress`, `resume`, and `@agent`
 - `--no-auto-confirm`: supported by `chat`, `pipeline`, `team`, `resume`, and `@agent`
@@ -190,4 +205,5 @@ python omo.py pipeline "Integrate SSO login"
   `$HOME/Documents/Code/universal-harness-kit/scripts/agent-policy-stack --tool codex --cwd "$PWD" --strict --strict-profile harness`
 - `pipeline already running`: another pipeline run currently owns the lock; inspect `pid/run_id` in `.omo/pipeline.pid` and retry after it completes
 - Live CLI failures: verify `claude/codex/gemini` availability and auth in your current shell
+- To debug external command failures: add `--debug` (for example `python omo.py --debug pipeline "..."`) to inspect full subprocess commands
 - To clean residual worktree quickly: run `python omo.py cleanup`

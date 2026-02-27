@@ -3,6 +3,31 @@
 > 规则：动态进度只写在这里；不要把动态内容写进 docs/ 或长期规范文件。
 
 ## 最新交接（追加在最上方）
+- Date：2026-02-27 20:44:45 (CST)
+- Branch：ai/20260227-phase0-upgrade
+- Commit：3d067e5
+- git status（摘要）：`M README.md`、`M lib/agents.py`、`M lib/context.py`、`M lib/integrations.py`、`M lib/orchestrator.py`、`M lib/orchestrator_pipeline.py`、`M omo.py`、`M tests/test_omo_cli.py`、`M tests/test_step1_core.py`、`M tests/test_step3_to_step5_orchestrator.py`、`?? lib/logging_config.py`
+- 最小验证命令：`./scripts/verify`、`./scripts/secrets-check`
+- 关键输出摘录（key output excerpts）：
+  - `./scripts/verify -> [verify] OK`
+  - `pytest -> 43 passed in 23.54s`
+  - `./scripts/secrets-check -> [secrets-check] OK`
+  - `pipeline stage 日志: [stage 1/6] ... [stage 6/6]`
+
+### Done
+- 完成 Phase 3 OMO 核心任务：
+  - 新增 logging 配置模块并支持全局 `--verbose/-v`、`--debug`。
+  - pipeline stage 级进度日志输出（`[stage i/6] ...`）。
+  - agent 调用结果持久化到 `run_dir/agents/*.json`（`returncode` + `stderr` 前 500 字符）。
+  - stage 级 duration 记录到 `stage_results` 与 `meta.json.stage_durations`。
+- 双语 usage 文档同步：`README.md` 更新新 flags、日志行为与产物目录说明。
+- 测试补齐：CLI flag 转发、stage 日志、agent stderr 500 截断、duration contract、debug subprocess 日志。
+
+### Next Steps（3-8 条，按优先级）
+1. 提交当前改动（Phase 3 logging/progress/agent artifacts/duration）。
+2. 如需更细粒度指标，可将 stage duration 进一步按子步骤（review/fix loop）拆分并单独入库。
+3. 若要统一可观测性，可为 team 流程补充与 pipeline 同构的 stage progress 输出。
+
 - Date：2026-02-27 20:13:25 (Asia/Shanghai)
 - Branch：ai/20260227-phase0-upgrade
 - Commit：de36321
