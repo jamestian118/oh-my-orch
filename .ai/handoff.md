@@ -290,3 +290,7 @@
 - Branch：ai/20260223-omo-step1-6
 - Commit：d743ff0
 - 重点：完成 pipeline/team 对齐（runs 目录 + 北京时间 + pipeline-summary）。
+
+## 2026-02-27 Phase 7 follow-up（7.5 cross-ref）
+- 补充 OMO 对 CHB 快照契约文档引用：`$CHB_ROOT/docs/snapshot-schema.md`（中英 README 已同步）。
+- 目的：与 CSM 共享同一 snapshot contract，避免下游解析漂移。

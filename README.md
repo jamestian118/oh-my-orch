@@ -71,6 +71,7 @@ python omo.py -v --debug pipeline "接入 SSO 登录"
 - 状态文件：`.omo/pipeline-state.json`
 - 会话文件：`.omo/session.jsonl`、`.omo/chat-history.jsonl`
 - 关键产物（兼容入口）：`.ai/project-brief.md`、`.ai/exec-plan.md`、`.ai/review.md`
+- 跨工具快照契约（供 OMO/CSM 共享）：`CHB_ROOT="${CHB_ROOT:-$HOME/Documents/Code/cli-handoff-bundle}"`，参考 `$CHB_ROOT/docs/snapshot-schema.md`
 - Pipeline 产物目录：`.ai/pipeline/runs/<run-id>/`（每次运行新目录；`run-id` 命名为“日期-时间-梗概-短哈希”：`YYYYMMDD-HHMMSS-<summary>-<short-hash>`，时间为北京时间 `Asia/Shanghai`；含 `project-brief.md`、`exec-plan.md`、`review.md`、`pipeline-summary.md`、`meta.json`）
 - Pipeline agent 结果目录：`.ai/pipeline/runs/<run-id>/agents/`（每个 stage 一个 JSON，记录 agent `returncode` 与 `stderr` 前 500 字符）
 - Pipeline 最新快照：`.ai/pipeline/latest/`（含 `pipeline-summary.md`、`run.json`）
@@ -179,6 +180,7 @@ python omo.py -v --debug pipeline "Integrate SSO login"
 - State files: `.omo/pipeline-state.json`
 - Session files: `.omo/session.jsonl`, `.omo/chat-history.jsonl`
 - Key artifacts (compat paths): `.ai/project-brief.md`, `.ai/exec-plan.md`, `.ai/review.md`
+- Cross-tool snapshot contract shared by OMO/CSM: `CHB_ROOT="${CHB_ROOT:-$HOME/Documents/Code/cli-handoff-bundle}"`, see `$CHB_ROOT/docs/snapshot-schema.md`
 - Pipeline artifacts: `.ai/pipeline/runs/<run-id>/` (new directory per run; `run-id` format `YYYYMMDD-HHMMSS-<summary>-<short-hash>` in Beijing time `Asia/Shanghai`; includes `project-brief.md`, `exec-plan.md`, `review.md`, `pipeline-summary.md`, `meta.json`)
 - Pipeline agent result artifacts: `.ai/pipeline/runs/<run-id>/agents/` (one JSON per stage, including agent `returncode` and first 500 chars of `stderr`)
 - Latest pipeline snapshot: `.ai/pipeline/latest/` (contains `pipeline-summary.md`, `run.json`)
