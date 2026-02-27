@@ -23,9 +23,10 @@ python -m pip install -e .
 ```bash
 # 查看完整 CLI 帮助
 python omo.py --help
+python omo.py --version
 
 # Chat 模式（@agent 快捷语法）
-python omo.py @claude "设计认证模块" --dry-run
+python omo.py @claude "设计认证模块" --dry-run --output text
 python omo.py @codex chat "执行重构计划" --cwd . --no-auto-confirm
 
 # Chat 模式（标准子命令）
@@ -33,7 +34,7 @@ python omo.py chat codex "执行重构计划" --dry-run
 
 # Pipeline 模式
 python omo.py pipeline "给项目添加用户认证" --dry-run
-python omo.py -v pipeline "给项目添加用户认证" --dry-run
+python omo.py -v pipeline "给项目添加用户认证" --dry-run --output text
 
 # Team 模式
 python omo.py team "微服务还是单体" --dry-run
@@ -64,7 +65,7 @@ python omo.py -v --debug pipeline "接入 SSO 登录"
 
 #### I/O
 - 输入：CLI 参数（任务描述、模式、`--dry-run`、`--stop-after` 等）
-- 输出：标准 JSON 到 stdout（便于管道/自动化消费）
+- 输出：默认 `--output json` 为结构化 JSON；`--output text` 为人类可读表格
 - `--verbose/-v` 时输出 pipeline stage 进度到 stderr（例如 `[stage 2/6] ...`）
 - `--debug` 时额外输出完整 subprocess 命令（stderr）
 - 状态文件：`.omo/pipeline-state.json`
@@ -84,8 +85,10 @@ python omo.py -v --debug pipeline "接入 SSO 登录"
 
 #### flags
 - `-h, --help`：顶层命令和各子命令都支持帮助信息
+- `--version`：输出 `omo <version>` 并退出
 - `-v, --verbose`：顶层全局 flag，输出 stage 级进度日志
 - `--debug`：顶层全局 flag，输出完整 subprocess 命令（包含 agent/gemini/git 调用）
+- `--output <json|text>`：各子命令与 `@agent` 快捷语法支持，默认 `json`
 - `--cwd <path>`：`@agent` 快捷语法与全部子命令支持
 - `--dry-run`：`chat`、`pipeline`、`team`、`compress`、`resume` 与 `@agent` 支持
 - `--no-auto-confirm`：`chat`、`pipeline`、`team`、`resume` 与 `@agent` 支持
@@ -128,9 +131,10 @@ python -m pip install -e .
 ```bash
 # Print complete CLI help
 python omo.py --help
+python omo.py --version
 
 # Chat mode (@agent shorthand)
-python omo.py @claude "Design an auth module" --dry-run
+python omo.py @claude "Design an auth module" --dry-run --output text
 python omo.py @codex chat "Execute the refactor plan" --cwd . --no-auto-confirm
 
 # Chat mode (explicit subcommand)
@@ -138,7 +142,7 @@ python omo.py chat codex "Execute the refactor plan" --dry-run
 
 # Pipeline mode
 python omo.py pipeline "Add user authentication" --dry-run
-python omo.py -v pipeline "Add user authentication" --dry-run
+python omo.py -v pipeline "Add user authentication" --dry-run --output text
 
 # Team mode
 python omo.py team "Microservice vs monolith?" --dry-run
@@ -169,7 +173,7 @@ python omo.py -v --debug pipeline "Integrate SSO login"
 
 #### I/O
 - Input: CLI args (task text, mode, `--dry-run`, `--stop-after`, etc.)
-- Output: JSON payload to stdout
+- Output: structured JSON by default (`--output json`), or human-readable table (`--output text`)
 - With `--verbose/-v`, pipeline stage progress is emitted to stderr (for example `[stage 2/6] ...`)
 - With `--debug`, full subprocess commands are emitted to stderr
 - State files: `.omo/pipeline-state.json`
@@ -189,8 +193,10 @@ python omo.py -v --debug pipeline "Integrate SSO login"
 
 #### flags
 - `-h, --help`: available on the top-level command and every subcommand
+- `--version`: prints `omo <version>` and exits
 - `-v, --verbose`: top-level global flag to print stage-level progress logs
 - `--debug`: top-level global flag to print full subprocess commands (agent/gemini/git invocations)
+- `--output <json|text>`: supported by all subcommands and `@agent`, default `json`
 - `--cwd <path>`: supported by `@agent` shorthand and all subcommands
 - `--dry-run`: supported by `chat`, `pipeline`, `team`, `compress`, `resume`, and `@agent`
 - `--no-auto-confirm`: supported by `chat`, `pipeline`, `team`, `resume`, and `@agent`

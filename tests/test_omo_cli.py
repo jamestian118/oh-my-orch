@@ -18,6 +18,22 @@ class _StubOrchestrator:
     debug: bool = False
     calls: list[dict[str, Any]] = field(default_factory=list)
 
+    def chat(self, *, agent: str, prompt: str, dry_run: bool | None = None) -> dict[str, Any]:
+        self.calls.append(
+            {
+                "command": "chat",
+                "agent": agent,
+                "prompt": prompt,
+                "dry_run": dry_run,
+            }
+        )
+        return {
+            "ok": True,
+            "command": "chat",
+            "agent": agent,
+            "reply": "stub-reply",
+        }
+
     def pipeline(
         self,
         *,
@@ -110,6 +126,16 @@ def test_at_agent_cwd_missing_value_returns_clear_error(capsys) -> None:
     assert "`--cwd` 缺少路径参数" in captured.err
 
 
+def test_parser_help_contains_description_and_examples() -> None:
+    parser = omo._build_parser()
+    help_text = parser.format_help()
+
+    assert "Orchestrate Claude Code, Codex CLI, and Gemini CLI tasks." in help_text
+    assert "Examples:" in help_text
+    assert "omo chat codex 修复登录 bug --cwd /path/to/repo" in help_text
+    assert "omo pipeline 实现 OMO Phase 6 --dry-run --output text" in help_text
+
+
 def test_pipeline_stop_after_forwarded_to_orchestrator(monkeypatch, capsys) -> None:
     instances = _install_stub_orchestrator(monkeypatch)
 
@@ -199,6 +225,61 @@ def test_main_prefers_payload_exit_code(monkeypatch, capsys) -> None:
     assert exit_code == 42
     assert payload["ok"] is True
     assert payload["exit_code"] == 42
+
+
+def test_text_output_mode_renders_human_readable_table(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(
+        omo,
+        "_dispatch",
+        lambda _ns: {
+            "ok": True,
+            "command": "status",
+            "meta": {"stage": 6, "items": ["6.1", "6.2", "6.3"]},
+        },
+    )
+
+    exit_code = omo.main(["status", "--output", "text"])
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert "Field" in captured.out
+    assert "Value" in captured.out
+    assert "command" in captured.out
+    assert "status" in captured.out
+    assert '"stage": 6' in captured.out
+
+
+def test_at_agent_supports_output_text(monkeypatch, capsys) -> None:
+    instances = _install_stub_orchestrator(monkeypatch)
+
+    exit_code = omo.main(["@codex", "chat", "总结今天进度", "--dry-run", "--output", "text"])
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert "Field" in captured.out
+    assert "chat" in captured.out
+
+    assert len(instances) == 1
+    stub = instances[0]
+    assert stub.calls == [
+        {
+            "command": "chat",
+            "agent": "codex",
+            "prompt": "总结今天进度",
+            "dry_run": True,
+        }
+    ]
+
+
+def test_version_flag_prints_version_and_exits(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(omo, "_resolve_cli_version", lambda: "9.9.9")
+
+    exit_code = omo.main(["--version"])
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert captured.out.strip() == "omo 9.9.9"
+    assert captured.err == ""
 
 
 def test_global_verbose_and_debug_flags_forwarded(monkeypatch, capsys) -> None:
