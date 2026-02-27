@@ -15,6 +15,8 @@
 #### setup
 ```bash
 ./scripts/setup
+# 可选：以 editable 方式安装当前项目（支持直接 `omo` 入口）
+python -m pip install -e .
 ```
 
 #### exact commands
@@ -110,6 +112,8 @@ It persists truth-source artifacts in `.ai/*` and runtime state in `.omo/pipelin
 #### setup
 ```bash
 ./scripts/setup
+# Optional: install this repo as an editable package (enables the `omo` entrypoint)
+python -m pip install -e .
 ```
 
 #### exact commands

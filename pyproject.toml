@@ -1,3 +1,24 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "oh-my-orch"
+version = "0.1.0"
+description = "Multi-agent CLI orchestrator for Claude Code, Codex CLI, and Gemini CLI."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+omo = "omo:main"
+
+[tool.setuptools]
+py-modules = ["omo"]
+
+[tool.setuptools.packages.find]
+include = ["lib*"]
+
 [tool.ruff]
 line-length = 100
 target-version = "py311"
