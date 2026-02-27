@@ -58,6 +58,21 @@ def test_message_bus_jsonl_persistence_and_reset(tmp_path) -> None:
     assert not session_file.exists()
 
 
+def test_message_bus_load_invalid_jsonl_rebuilds_store(tmp_path, caplog) -> None:
+    session_file = tmp_path / ".omo" / "session.jsonl"
+    session_file.parent.mkdir(parents=True, exist_ok=True)
+    session_file.write_text("{invalid-json}\n", encoding="utf-8")
+
+    bus = MessageBus(session_file)
+    with caplog.at_level(logging.WARNING):
+        loaded = bus.load()
+
+    assert loaded == []
+    assert bus.history() == []
+    assert "clearing and rebuilding" in caplog.text
+    assert session_file.read_text(encoding="utf-8") == ""
+
+
 def test_cli_agent_timeout_converts_bytes_output(monkeypatch) -> None:
     agent = CLIAgent("claude", binary="claude")
 
@@ -75,6 +90,32 @@ def test_cli_agent_timeout_converts_bytes_output(monkeypatch) -> None:
     assert result.returncode == 124
     assert result.stdout == "partial-bytes"
     assert "timeout after 1s" in result.stderr
+
+
+def test_cli_agent_retries_with_exponential_backoff(monkeypatch) -> None:
+    agent = CLIAgent("codex", binary="codex")
+    call_count = {"value": 0}
+    sleep_calls: list[float] = []
+
+    def fake_run(*args, **kwargs):
+        _ = args, kwargs
+        call_count["value"] += 1
+        returncode = 1 if call_count["value"] < 3 else 0
+        return subprocess.CompletedProcess(
+            ["codex", "exec", "hello"],
+            returncode=returncode,
+            stdout="ok" if returncode == 0 else "",
+            stderr="fail" if returncode != 0 else "",
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr("lib.agents.time.sleep", sleep_calls.append)
+
+    result = agent.run_non_interactive("hello")
+
+    assert result.returncode == 0
+    assert call_count["value"] == 3
+    assert sleep_calls == [0.5, 1.0]
 
 
 def test_cli_agent_debug_logs_full_subprocess_command(monkeypatch, caplog) -> None:

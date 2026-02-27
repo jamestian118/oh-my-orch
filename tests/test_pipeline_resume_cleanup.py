@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import fcntl
 import json
+import shutil
+import subprocess
 import sys
+from pathlib import Path
 
 from lib.agents import AgentRunResult
 from lib.orchestrator import PIPELINE_STAGES, Orchestrator
@@ -145,3 +148,67 @@ def test_pipeline_rejects_concurrent_run_when_lock_is_held(tmp_path) -> None:
     assert "run_id=existing-run" in result["error"]
     assert result["lock_file"] == str(lock_file)
     assert result["pid_file"] == str(pid_file)
+
+
+def test_pipeline_preflight_blocks_when_agent_binary_missing(tmp_path, monkeypatch) -> None:
+    orch = Orchestrator(root_dir=tmp_path, dry_run=False)
+
+    def fake_which(tool: str) -> str | None:
+        return None if tool == "codex" else f"/usr/bin/{tool}"
+
+    def policy_check_should_not_run(*, cwd: Path):
+        _ = cwd
+        raise AssertionError("policy_check should not run when agent binary is missing")
+
+    monkeypatch.setattr("lib.orchestrator_pipeline.shutil.which", fake_which)
+    monkeypatch.setattr(orch.integrations, "policy_check", policy_check_should_not_run)
+
+    result = orch.pipeline(task="缺少 codex 二进制预检", dry_run=False)
+
+    assert result["ok"] is False
+    assert result["command"] == "pipeline"
+    assert result["mode"] == "live"
+    assert result["missing_agents"] == ["codex"]
+    assert "missing agent CLI(s): codex" in result["error"]
+
+    state = orch.load_state()
+    assert state["pipeline"]["status"] == "blocked"
+    assert state["pipeline"]["last_error"] == "missing agent CLI(s): codex"
+
+
+def test_cleanup_removes_orphan_sandbox_worktrees_from_git_list(tmp_path, monkeypatch) -> None:
+    orch = Orchestrator(root_dir=tmp_path, dry_run=True)
+    orphan = tmp_path / ".omo" / "omo-sandbox-orphan"
+    orphan.mkdir(parents=True, exist_ok=True)
+    (orphan / "marker.txt").write_text("orphan", encoding="utf-8")
+    commands: list[list[str]] = []
+
+    def fake_run_subprocess(self, command: list[str], **kwargs):
+        _ = self
+        _ = kwargs
+        commands.append(command)
+        if command[-3:] == ["worktree", "list", "--porcelain"]:
+            stdout = (
+                f"worktree {tmp_path}\n"
+                "HEAD 1111111111111111111111111111111111111111\n"
+                "branch refs/heads/main\n"
+                "\n"
+                f"worktree {orphan}\n"
+                "HEAD 2222222222222222222222222222222222222222\n"
+                "branch refs/heads/omo-sandbox-orphan\n"
+                "\n"
+            )
+            return subprocess.CompletedProcess(command, returncode=0, stdout=stdout, stderr="")
+        if command[-2:] == [str(orphan), "--force"]:
+            shutil.rmtree(orphan, ignore_errors=True)
+            return subprocess.CompletedProcess(command, returncode=0, stdout="", stderr="")
+        return subprocess.CompletedProcess(command, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(Orchestrator, "_run_subprocess", fake_run_subprocess)
+
+    cleaned = orch.cleanup()
+
+    assert cleaned["ok"] is True
+    assert str(orphan) in cleaned["removed_paths"]
+    assert not orphan.exists()
+    assert any(cmd[-2:] == ["-D", "omo-sandbox-orphan"] for cmd in commands)

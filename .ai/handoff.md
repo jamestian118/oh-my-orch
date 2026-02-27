@@ -3,6 +3,35 @@
 > 规则：动态进度只写在这里；不要把动态内容写进 docs/ 或长期规范文件。
 
 ## 最新交接（追加在最上方）
+- Date：2026-02-27 21:09:58 (CST)
+- Branch：ai/20260227-phase0-upgrade
+- Commit：46430a5
+- git status（摘要）：`M lib/agents.py`、`M lib/bus.py`、`M lib/orchestrator_pipeline.py`、`M tests/test_pipeline_resume_cleanup.py`、`M tests/test_step1_core.py`、`?? lib/protocols.py`
+- 最小验证命令：`$HOME/Documents/Code/universal-harness-kit/scripts/agent-policy-stack --tool codex --cwd "$PWD" --strict --strict-profile harness`、`./scripts/verify`、`./scripts/secrets-check`
+- 关键输出摘录（key output excerpts）：
+  - `agent-policy-stack(strict) -> strict_result=pass`
+  - `./scripts/verify -> [verify] OK`
+  - `pytest -> 51 passed in 23.57s`
+  - `coverage gate -> Required test coverage of 75% reached. Total coverage: 82.18%`
+  - `./scripts/secrets-check -> [secrets-check] OK`
+  - `non-blocking noise -> verify 末尾仍出现 datetime.UTC traceback（exit code 仍为 0）`
+
+### Done
+- 完成 Phase 5 OMO lane 5.1-5.6：
+  - 新增 `lib/protocols.py`，定义 `OrchestratorProtocol` 并在 `lib/orchestrator_pipeline.py` 全量替换 `orch: Any`。
+  - `run_pipeline` 重构为多子函数编排（主函数 60 行；核心调度函数 46 行；其余 stage helper 均短函数化）。
+  - preflight 增加 agent binary 可用性检查（`shutil.which`，缺失时 `blocked` + 落盘持久化 + 返回 `missing_agents`）。
+  - `MessageBus.load` 从 `ValueError` 失败改为 `warning + 清空重建`。
+  - `CLIAgent` 调用加入指数退避 retry（max 2，0.5s/1.0s）。
+  - `cleanup` 增加 `git worktree list --porcelain` 扫描并清理 `omo-sandbox-*` 孤儿 worktree/branch。
+- 测试补齐：
+  - `tests/test_step1_core.py`：坏 JSONL 重建、CLI retry backoff。
+  - `tests/test_pipeline_resume_cleanup.py`：agent binary preflight 阻断、orphan worktree 清理。
+
+### Next Steps（3-8 条，按优先级）
+1. 提交本阶段改动（建议 message：`refactor: complete phase5 architecture hardening for omo`）。
+2. 后续可选：单独修复 `scripts/verify` 尾部 `datetime.UTC` traceback（当前不影响门禁 exit code）。
+
 - Date：2026-02-27 20:57:12 (CST)
 - Branch：ai/20260227-phase0-upgrade
 - Commit：f183b52

@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import sys
 from dataclasses import dataclass
 from datetime import datetime
@@ -16,7 +17,9 @@ from typing import Any, Callable, Sequence
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
+from .agents import SUPPORTED_AGENT_TOOLS
 from .logging_config import stderr_preview
+from .protocols import OrchestratorProtocol, StageResultProtocol
 from .run_registry import ensure_project_registry, write_run_registry
 
 _BJT = ZoneInfo("Asia/Shanghai")
@@ -76,7 +79,7 @@ def _read_pipeline_owner(pid_file: Path) -> tuple[int, str]:
 
 
 def _acquire_pipeline_lock(
-    orch: Any,
+    orch: OrchestratorProtocol,
     *,
     run_id: str,
     task: str,
@@ -156,7 +159,12 @@ def _copy_text(src: Path, dst: Path) -> bool:
     return True
 
 
-def _sync_root_artifact_to_worktree(orch: Any, *, artifact_name: str, worktree_path: Path) -> None:
+def _sync_root_artifact_to_worktree(
+    orch: OrchestratorProtocol,
+    *,
+    artifact_name: str,
+    worktree_path: Path,
+) -> None:
     root_file = orch._artifact_abs(artifact_name, cwd=orch.root)
     worktree_file = orch._artifact_abs(artifact_name, cwd=worktree_path)
     if not root_file.exists():
@@ -167,7 +175,7 @@ def _sync_root_artifact_to_worktree(orch: Any, *, artifact_name: str, worktree_p
 
 
 def _sync_pipeline_artifacts(
-    orch: Any,
+    orch: OrchestratorProtocol,
     *,
     run_dir: Path,
     latest_dir: Path,
@@ -354,7 +362,7 @@ def _build_pipeline_summary(
 
 
 def _persist_pipeline_outputs(
-    orch: Any,
+    orch: OrchestratorProtocol,
     *,
     state: dict[str, Any],
     run_id: str,
@@ -529,56 +537,59 @@ def _persist_pipeline_outputs(
     }
 
 
-def run_pipeline(
-    orch: Any,
+@dataclass(slots=True)
+class PipelineRunContext:
+    orch: OrchestratorProtocol
+    lock_state: PipelineLockState
+    state: dict[str, Any]
+    run_id: str
+    run_dir: Path
+    latest_dir: Path
+    task: str
+    mode: str
+    run_dry: bool
+    utc_now: Callable[[], str]
+    pipeline_stages: Sequence[str]
+    stage_result_cls: type[Any]
+    worktree_path: Path
+    worktree_branch: str
+    stage_results: list[dict[str, Any]]
+
+
+def _resolve_pipeline_dir(root: Path, *, raw: str, fallback: Path) -> Path:
+    target = Path(raw) if raw else fallback
+    if target.is_absolute():
+        return target
+    return (root / target).resolve(strict=False)
+
+
+def _prepare_pipeline_context(
+    orch: OrchestratorProtocol,
     *,
+    state: dict[str, Any],
+    lock_state: PipelineLockState,
+    run_id: str,
     task: str,
-    dry_run: bool | None = None,
-    stop_after: int | None = None,
-    resume: bool = False,
+    run_dry: bool,
+    mode: str,
+    resume: bool,
     pipeline_stages: Sequence[str],
     stage_result_cls: type[Any],
     utc_now: Callable[[], str],
-) -> dict[str, Any]:
-    run_dry, mode = orch._resolve_mode(dry_run)
-    task = task.strip()
-    if not task:
-        raise ValueError("pipeline task 不能为空")
-
-    state = orch.load_state()
+) -> PipelineRunContext:
     pipeline_root = orch.ai_dir / "pipeline"
-
-    run_id_raw = str(state["pipeline"].get("run_id", "") or "").strip() if resume else ""
-    run_id = run_id_raw or _build_pipeline_run_id(task)
-    lock_state = _acquire_pipeline_lock(orch, run_id=run_id, task=task, utc_now=utc_now)
-    if not lock_state.acquired:
-        owner = []
-        if lock_state.owner_pid:
-            owner.append(f"pid={lock_state.owner_pid}")
-        if lock_state.owner_run_id:
-            owner.append(f"run_id={lock_state.owner_run_id}")
-        owner_hint = f" ({', '.join(owner)})" if owner else ""
-        return _return_with_lock_release(
-            lock_state,
-            {
-                "ok": False,
-                "command": "pipeline",
-                "mode": mode,
-                "error": f"pipeline already running{owner_hint}",
-                "lock_file": str(lock_state.lock_file),
-                "pid_file": str(lock_state.pid_file),
-            },
-        )
-
     run_dir_raw = str(state["pipeline"].get("run_dir", "") or "").strip() if resume else ""
-    run_dir = Path(run_dir_raw) if run_dir_raw else pipeline_root / "runs" / run_id
-    if not run_dir.is_absolute():
-        run_dir = (orch.root / run_dir).resolve(strict=False)
-
     latest_dir_raw = str(state["pipeline"].get("latest_dir", "") or "").strip() if resume else ""
-    latest_dir = Path(latest_dir_raw) if latest_dir_raw else pipeline_root / "latest"
-    if not latest_dir.is_absolute():
-        latest_dir = (orch.root / latest_dir).resolve(strict=False)
+    run_dir = _resolve_pipeline_dir(
+        orch.root,
+        raw=run_dir_raw,
+        fallback=pipeline_root / "runs" / run_id,
+    )
+    latest_dir = _resolve_pipeline_dir(
+        orch.root,
+        raw=latest_dir_raw,
+        fallback=pipeline_root / "latest",
+    )
 
     if not resume:
         state["pipeline"].update(
@@ -613,381 +624,467 @@ def run_pipeline(
 
     state["last_action"] = "pipeline"
     orch.save_state(state)
+    return PipelineRunContext(
+        orch=orch,
+        lock_state=lock_state,
+        state=state,
+        run_id=run_id,
+        run_dir=run_dir,
+        latest_dir=latest_dir,
+        task=task,
+        mode=mode,
+        run_dry=run_dry,
+        utc_now=utc_now,
+        pipeline_stages=pipeline_stages,
+        stage_result_cls=stage_result_cls,
+        worktree_path=Path(state["pipeline"].get("worktree_path", "") or orch.root),
+        worktree_branch=str(state["pipeline"].get("worktree_branch", "") or ""),
+        stage_results=[],
+    )
 
-    worktree_path = Path(state["pipeline"].get("worktree_path", "") or orch.root)
-    worktree_branch = state["pipeline"].get("worktree_branch", "")
-    stage_results: list[dict[str, Any]] = []
 
-    if not run_dry:
-        try:
-            preflight = orch.integrations.policy_check(cwd=orch.root)
-        except Exception as exc:  # pragma: no cover - defensive integration boundary.
-            return _return_with_lock_release(
-                lock_state,
-                {
-                    "ok": False,
-                    "command": "pipeline",
-                    "mode": mode,
-                    "error": f"policy check exception: {exc}",
-                    "lock_file": str(lock_state.lock_file),
-                    "pid_file": str(lock_state.pid_file),
-                },
-            )
-        if not preflight.ok:
-            state["pipeline"]["status"] = "blocked"
-            state["pipeline"]["last_error"] = preflight.error or "policy check failed"
-            persisted = _persist_pipeline_outputs(
-                orch,
-                state=state,
-                run_id=run_id,
-                run_dir=run_dir,
-                latest_dir=latest_dir,
-                task=task,
-                mode=mode,
-                status="blocked",
-                stage_results=stage_results,
-                error=state["pipeline"]["last_error"],
-                worktree_path=worktree_path,
-                worktree_branch=worktree_branch,
-            )
-            orch.save_state(state)
-            return _return_with_lock_release(
-                lock_state,
-                {
-                    "ok": False,
-                    "command": "pipeline",
-                    "mode": mode,
-                    "error": state["pipeline"]["last_error"],
-                    **persisted,
-                },
-            )
+def _pipeline_lock_conflict_payload(lock_state: PipelineLockState, *, mode: str) -> dict[str, Any]:
+    owner = []
+    if lock_state.owner_pid:
+        owner.append(f"pid={lock_state.owner_pid}")
+    if lock_state.owner_run_id:
+        owner.append(f"run_id={lock_state.owner_run_id}")
+    owner_hint = f" ({', '.join(owner)})" if owner else ""
+    return _return_with_lock_release(
+        lock_state,
+        {
+            "ok": False,
+            "command": "pipeline",
+            "mode": mode,
+            "error": f"pipeline already running{owner_hint}",
+            "lock_file": str(lock_state.lock_file),
+            "pid_file": str(lock_state.pid_file),
+        },
+    )
 
-    start_index = 0
-    if resume and state["pipeline"]["current_stage"] in pipeline_stages:
-        start_index = pipeline_stages.index(state["pipeline"]["current_stage"])
-    total_stages = len(pipeline_stages)
+
+def _persist_pipeline_result(
+    ctx: PipelineRunContext,
+    *,
+    ok: bool,
+    status: str,
+    error: str,
+    include_stage_results: bool,
+    extra: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    if not status.startswith("stopped_after_"):
+        ctx.state["pipeline"]["status"] = status
+    if status == "completed":
+        ctx.state["pipeline"]["current_stage"] = ""
+        ctx.state["pipeline"]["finished_at"] = ctx.utc_now()
+        ctx.state["pipeline"]["last_error"] = ""
+    else:
+        ctx.state["pipeline"]["last_error"] = error
+
+    persisted = _persist_pipeline_outputs(
+        ctx.orch,
+        state=ctx.state,
+        run_id=ctx.run_id,
+        run_dir=ctx.run_dir,
+        latest_dir=ctx.latest_dir,
+        task=ctx.task,
+        mode=ctx.mode,
+        status=status,
+        stage_results=ctx.stage_results,
+        error=error,
+        worktree_path=ctx.worktree_path,
+        worktree_branch=ctx.worktree_branch,
+    )
+    ctx.orch.save_state(ctx.state)
+
+    payload: dict[str, Any] = {"ok": ok, "command": "pipeline", "mode": ctx.mode, **persisted}
+    if include_stage_results:
+        payload["stage_results"] = ctx.stage_results
+    if error:
+        payload["error"] = error
+    if ok:
+        payload["state_file"] = str(ctx.orch.state_path)
+    if extra:
+        payload.update(extra)
+    return _return_with_lock_release(ctx.lock_state, payload)
+
+
+def _missing_agent_tools() -> list[str]:
+    return [tool for tool in SUPPORTED_AGENT_TOOLS if shutil.which(tool) is None]
+
+
+def _run_preflight(ctx: PipelineRunContext) -> dict[str, Any] | None:
+    if ctx.run_dry:
+        return None
+
+    missing_agents = _missing_agent_tools()
+    if missing_agents:
+        return _persist_pipeline_result(
+            ctx,
+            ok=False,
+            status="blocked",
+            error=f"missing agent CLI(s): {', '.join(missing_agents)}",
+            include_stage_results=False,
+            extra={"missing_agents": missing_agents},
+        )
 
     try:
-        for index, stage in enumerate(pipeline_stages[start_index:], start=start_index):
-            state["pipeline"]["current_stage"] = stage
-            orch.save_state(state)
-            stage_no = index + 1
-            LOGGER.info("[stage %s/%s] %s started", stage_no, total_stages, stage)
-            stage_started = perf_counter()
-
-            if stage == "stage0_project_brief":
-                result = orch._stage0_project_brief(task, run_dry=run_dry, cwd=orch.root)
-            elif stage == "stage1_exec_plan":
-                result = orch._stage1_exec_plan(task, run_dry=run_dry, cwd=orch.root)
-                exec_plan = orch._artifact_abs("exec_plan", cwd=orch.root)
-                if not exec_plan.exists():
-                    orch._write_text(exec_plan, orch._fallback_exec_plan(task))
-                if not orch.auto_confirm and sys.stdin.isatty() and not run_dry:
-                    answer = input("执行方案已生成，继续执行？[Y/n] ").strip().lower()
-                    if answer in {"n", "no"}:
-                        state["pipeline"]["status"] = "blocked"
-                        state["pipeline"]["last_error"] = (
-                            "user aborted after exec-plan confirmation"
-                        )
-                        persisted = _persist_pipeline_outputs(
-                            orch,
-                            state=state,
-                            run_id=run_id,
-                            run_dir=run_dir,
-                            latest_dir=latest_dir,
-                            task=task,
-                            mode=mode,
-                            status="blocked",
-                            stage_results=stage_results,
-                            error=state["pipeline"]["last_error"],
-                            worktree_path=worktree_path,
-                            worktree_branch=worktree_branch,
-                        )
-                        orch.save_state(state)
-                        return _return_with_lock_release(
-                            lock_state,
-                            {
-                                "ok": False,
-                                "command": "pipeline",
-                                "mode": mode,
-                                "stage_results": stage_results,
-                                "error": state["pipeline"]["last_error"],
-                                **persisted,
-                            },
-                        )
-
-                history_text = orch._history_text(limit=120)
-                compact = orch.context.compress_context(
-                    history_text or task,
-                    target_agent="codex",
-                    dry_run=run_dry,
-                )
-                state["pipeline"]["codex_handoff"] = compact.summary
-            elif stage == "stage2_codex_execute":
-                if not worktree_branch:
-                    worktree_path, worktree_branch = orch._create_worktree(task, run_dry=run_dry)
-                    state["pipeline"]["worktree_path"] = str(worktree_path)
-                    state["pipeline"]["worktree_branch"] = worktree_branch
-                if worktree_path != orch.root:
-                    _sync_root_artifact_to_worktree(
-                        orch,
-                        artifact_name="project_brief",
-                        worktree_path=worktree_path,
-                    )
-                    _sync_root_artifact_to_worktree(
-                        orch,
-                        artifact_name="exec_plan",
-                        worktree_path=worktree_path,
-                    )
-                summary = state["pipeline"].get("codex_handoff", "")
-                result = orch._stage2_codex_execute(
-                    summary=summary,
-                    run_dry=run_dry,
-                    cwd=worktree_path,
-                )
-            elif stage == "stage3_gemini_review":
-                if not worktree_path.exists():
-                    worktree_path = orch.root
-                result = orch._stage3_gemini_review(run_dry=run_dry, cwd=worktree_path)
-                if worktree_path != orch.root:
-                    sandbox_review = orch._artifact_abs("review", cwd=worktree_path)
-                    root_review = orch._artifact_abs("review", cwd=orch.root)
-                    if sandbox_review.exists():
-                        orch._write_text(root_review, sandbox_review.read_text(encoding="utf-8"))
-            elif stage == "stage4_codex_fix":
-                if not worktree_path.exists():
-                    worktree_path = orch.root
-                result = orch._stage4_codex_fix(run_dry=run_dry, cwd=worktree_path)
-            elif stage == "stage5_final_review":
-                if not worktree_path.exists():
-                    worktree_path = orch.root
-
-                review_result = None
-                for attempt in range(orch.max_review_loops + 1):
-                    state["pipeline"]["retry_count"] = attempt
-                    review_result = orch._stage5_final_review(run_dry=run_dry, cwd=worktree_path)
-                    if review_result.ok:
-                        break
-                    if attempt < orch.max_review_loops:
-                        retry_started = perf_counter()
-                        fix_result = orch._stage4_codex_fix(run_dry=run_dry, cwd=worktree_path)
-                        retry_entry = {
-                            "stage": fix_result.stage,
-                            "ok": fix_result.ok,
-                            "details": fix_result.details,
-                            "retry": attempt + 1,
-                            "duration_sec": round(perf_counter() - retry_started, 3),
-                        }
-                        stage_results.append(retry_entry)
-                        agent_result_file = _persist_stage_agent_runs(
-                            run_dir,
-                            stage_entry=retry_entry,
-                            stage_index=stage_no,
-                            stage_total=total_stages,
-                        )
-                        if agent_result_file:
-                            retry_entry["agent_result_file"] = agent_result_file
-                            retry_entry["details"]["agent_result_file"] = agent_result_file
-                        LOGGER.info(
-                            "[stage %s/%s] %s retry-%s %s (%.3fs)",
-                            stage_no,
-                            total_stages,
-                            fix_result.stage,
-                            attempt + 1,
-                            "PASS" if fix_result.ok else "FAIL",
-                            retry_entry["duration_sec"],
-                        )
-                if review_result is None:
-                    review_result = stage_result_cls(stage, False, {"reason": "no review result"})
-                result = review_result
-            else:
-                result = stage_result_cls(stage, False, {"error": "unknown stage"})
-
-            stage_duration = round(perf_counter() - stage_started, 3)
-            stage_entry = {
-                "stage": result.stage,
-                "ok": result.ok,
-                "details": result.details,
-                "duration_sec": stage_duration,
-            }
-            stage_results.append(stage_entry)
-            agent_result_file = _persist_stage_agent_runs(
-                run_dir,
-                stage_entry=stage_entry,
-                stage_index=stage_no,
-                stage_total=total_stages,
-            )
-            if agent_result_file:
-                stage_entry["agent_result_file"] = agent_result_file
-                stage_entry["details"]["agent_result_file"] = agent_result_file
-            LOGGER.info(
-                "[stage %s/%s] %s %s (%.3fs)",
-                stage_no,
-                total_stages,
-                stage,
-                "PASS" if result.ok else "FAIL",
-                stage_duration,
-            )
-
-            if result.ok:
-                if stage not in state["pipeline"]["completed_stages"]:
-                    state["pipeline"]["completed_stages"].append(stage)
-            else:
-                state["pipeline"]["status"] = "failed"
-                state["pipeline"]["last_error"] = f"{stage} failed"
-                persisted = _persist_pipeline_outputs(
-                    orch,
-                    state=state,
-                    run_id=run_id,
-                    run_dir=run_dir,
-                    latest_dir=latest_dir,
-                    task=task,
-                    mode=mode,
-                    status="failed",
-                    stage_results=stage_results,
-                    error=state["pipeline"]["last_error"],
-                    worktree_path=worktree_path,
-                    worktree_branch=worktree_branch,
-                )
-                orch.save_state(state)
-                return _return_with_lock_release(
-                    lock_state,
-                    {
-                        "ok": False,
-                        "command": "pipeline",
-                        "mode": mode,
-                        "stage_results": stage_results,
-                        "error": state["pipeline"]["last_error"],
-                        **persisted,
-                    },
-                )
-
-            orch.save_state(state)
-            if stop_after is not None and index >= stop_after:
-                persisted = _persist_pipeline_outputs(
-                    orch,
-                    state=state,
-                    run_id=run_id,
-                    run_dir=run_dir,
-                    latest_dir=latest_dir,
-                    task=task,
-                    mode=mode,
-                    status=f"stopped_after_{index}",
-                    stage_results=stage_results,
-                    error=state["pipeline"].get("last_error", ""),
-                    worktree_path=worktree_path,
-                    worktree_branch=worktree_branch,
-                )
-                orch.save_state(state)
-                return _return_with_lock_release(
-                    lock_state,
-                    {
-                        "ok": True,
-                        "command": "pipeline",
-                        "mode": mode,
-                        "stopped_after": index,
-                        "stage_results": stage_results,
-                        "state_file": str(orch.state_path),
-                        **persisted,
-                    },
-                )
-
-        if worktree_branch and not run_dry:
-            merged, merge_log = orch._merge_worktree_branch(worktree_branch)
-            if not merged:
-                state["pipeline"]["status"] = "failed"
-                state["pipeline"]["last_error"] = f"merge failed: {merge_log}"
-                persisted = _persist_pipeline_outputs(
-                    orch,
-                    state=state,
-                    run_id=run_id,
-                    run_dir=run_dir,
-                    latest_dir=latest_dir,
-                    task=task,
-                    mode=mode,
-                    status="failed",
-                    stage_results=stage_results,
-                    error=state["pipeline"]["last_error"],
-                    worktree_path=worktree_path,
-                    worktree_branch=worktree_branch,
-                )
-                orch.save_state(state)
-                return _return_with_lock_release(
-                    lock_state,
-                    {
-                        "ok": False,
-                        "command": "pipeline",
-                        "mode": mode,
-                        "stage_results": stage_results,
-                        "error": state["pipeline"]["last_error"],
-                        **persisted,
-                    },
-                )
-            orch._remove_worktree(path=worktree_path, branch=worktree_branch, force=False)
-
-        state["pipeline"]["status"] = "completed"
-        state["pipeline"]["current_stage"] = ""
-        state["pipeline"]["finished_at"] = utc_now()
-        state["pipeline"]["last_error"] = ""
-        persisted = _persist_pipeline_outputs(
-            orch,
-            state=state,
-            run_id=run_id,
-            run_dir=run_dir,
-            latest_dir=latest_dir,
-            task=task,
-            mode=mode,
-            status="completed",
-            stage_results=stage_results,
-            error="",
-            worktree_path=worktree_path,
-            worktree_branch=worktree_branch,
-        )
-        orch.save_state(state)
+        preflight = ctx.orch.integrations.policy_check(cwd=ctx.orch.root)
+    except Exception as exc:  # pragma: no cover - defensive integration boundary.
         return _return_with_lock_release(
-            lock_state,
-            {
-                "ok": True,
-                "command": "pipeline",
-                "mode": mode,
-                "stage_results": stage_results,
-                "state_file": str(orch.state_path),
-                **persisted,
-            },
-        )
-    except Exception as exc:
-        state["pipeline"]["status"] = "failed"
-        state["pipeline"]["last_error"] = str(exc)
-        persisted = _persist_pipeline_outputs(
-            orch,
-            state=state,
-            run_id=run_id,
-            run_dir=run_dir,
-            latest_dir=latest_dir,
-            task=task,
-            mode=mode,
-            status="failed",
-            stage_results=stage_results,
-            error=str(exc),
-            worktree_path=worktree_path,
-            worktree_branch=worktree_branch,
-        )
-        orch.save_state(state)
-        return _return_with_lock_release(
-            lock_state,
+            ctx.lock_state,
             {
                 "ok": False,
                 "command": "pipeline",
-                "mode": mode,
-                "stage_results": stage_results,
-                "error": str(exc),
-                **persisted,
+                "mode": ctx.mode,
+                "error": f"policy check exception: {exc}",
+                "lock_file": str(ctx.lock_state.lock_file),
+                "pid_file": str(ctx.lock_state.pid_file),
             },
+        )
+    if preflight.ok:
+        return None
+    return _persist_pipeline_result(
+        ctx,
+        ok=False,
+        status="blocked",
+        error=preflight.error or "policy check failed",
+        include_stage_results=False,
+    )
+
+
+def _stage_result_details(result: StageResultProtocol) -> dict[str, Any]:
+    return result.details if isinstance(result.details, dict) else {}
+
+
+def _record_stage_entry(
+    ctx: PipelineRunContext,
+    *,
+    result: StageResultProtocol,
+    stage_index: int,
+    stage_total: int,
+    stage_duration: float,
+) -> None:
+    details = _stage_result_details(result)
+    stage_entry = {
+        "stage": result.stage,
+        "ok": result.ok,
+        "details": details,
+        "duration_sec": stage_duration,
+    }
+    ctx.stage_results.append(stage_entry)
+    agent_result_file = _persist_stage_agent_runs(
+        ctx.run_dir,
+        stage_entry=stage_entry,
+        stage_index=stage_index,
+        stage_total=stage_total,
+    )
+    if agent_result_file:
+        stage_entry["agent_result_file"] = agent_result_file
+        details["agent_result_file"] = agent_result_file
+
+
+def _run_stage5_review_with_retry(
+    ctx: PipelineRunContext,
+    *,
+    stage_index: int,
+    stage_total: int,
+) -> StageResultProtocol:
+    if not ctx.worktree_path.exists():
+        ctx.worktree_path = ctx.orch.root
+
+    review_result: StageResultProtocol | None = None
+    for attempt in range(ctx.orch.max_review_loops + 1):
+        ctx.state["pipeline"]["retry_count"] = attempt
+        review_result = ctx.orch._stage5_final_review(run_dry=ctx.run_dry, cwd=ctx.worktree_path)
+        if review_result.ok:
+            break
+        if attempt >= ctx.orch.max_review_loops:
+            continue
+        retry_started = perf_counter()
+        fix_result = ctx.orch._stage4_codex_fix(run_dry=ctx.run_dry, cwd=ctx.worktree_path)
+        retry_details = _stage_result_details(fix_result)
+        retry_entry = {
+            "stage": fix_result.stage,
+            "ok": fix_result.ok,
+            "details": retry_details,
+            "retry": attempt + 1,
+            "duration_sec": round(perf_counter() - retry_started, 3),
+        }
+        ctx.stage_results.append(retry_entry)
+        agent_result_file = _persist_stage_agent_runs(
+            ctx.run_dir,
+            stage_entry=retry_entry,
+            stage_index=stage_index,
+            stage_total=stage_total,
+        )
+        if agent_result_file:
+            retry_entry["agent_result_file"] = agent_result_file
+            retry_details["agent_result_file"] = agent_result_file
+        LOGGER.info(
+            "[stage %s/%s] %s retry-%s %s (%.3fs)",
+            stage_index,
+            stage_total,
+            fix_result.stage,
+            attempt + 1,
+            "PASS" if fix_result.ok else "FAIL",
+            retry_entry["duration_sec"],
+        )
+
+    if review_result is not None:
+        return review_result
+    return ctx.stage_result_cls("stage5_final_review", False, {"reason": "no review result"})
+
+
+def _execute_stage1_exec_plan(
+    ctx: PipelineRunContext,
+) -> tuple[StageResultProtocol, dict[str, Any] | None]:
+    orch = ctx.orch
+    result = orch._stage1_exec_plan(ctx.task, run_dry=ctx.run_dry, cwd=orch.root)
+    exec_plan = orch._artifact_abs("exec_plan", cwd=orch.root)
+    if not exec_plan.exists():
+        orch._write_text(exec_plan, orch._fallback_exec_plan(ctx.task))
+    if not orch.auto_confirm and sys.stdin.isatty() and not ctx.run_dry:
+        answer = input("执行方案已生成，继续执行？[Y/n] ").strip().lower()
+        if answer in {"n", "no"}:
+            return result, _persist_pipeline_result(
+                ctx,
+                ok=False,
+                status="blocked",
+                error="user aborted after exec-plan confirmation",
+                include_stage_results=True,
+            )
+    history_text = orch._history_text(limit=120)
+    compact = orch.context.compress_context(
+        history_text or ctx.task,
+        target_agent="codex",
+        dry_run=ctx.run_dry,
+    )
+    ctx.state["pipeline"]["codex_handoff"] = compact.summary
+    return result, None
+
+
+def _execute_stage2_codex_execute(ctx: PipelineRunContext) -> StageResultProtocol:
+    orch = ctx.orch
+    if not ctx.worktree_branch:
+        worktree_path, worktree_branch = orch._create_worktree(ctx.task, run_dry=ctx.run_dry)
+        ctx.worktree_path = worktree_path
+        ctx.worktree_branch = worktree_branch
+        ctx.state["pipeline"]["worktree_path"] = str(worktree_path)
+        ctx.state["pipeline"]["worktree_branch"] = worktree_branch
+    if ctx.worktree_path != orch.root:
+        _sync_root_artifact_to_worktree(
+            orch,
+            artifact_name="project_brief",
+            worktree_path=ctx.worktree_path,
+        )
+        _sync_root_artifact_to_worktree(
+            orch,
+            artifact_name="exec_plan",
+            worktree_path=ctx.worktree_path,
+        )
+    summary = str(ctx.state["pipeline"].get("codex_handoff", "") or "")
+    return orch._stage2_codex_execute(
+        summary=summary,
+        run_dry=ctx.run_dry,
+        cwd=ctx.worktree_path,
+    )
+
+
+def _execute_stage(
+    ctx: PipelineRunContext,
+    *,
+    stage: str,
+    stage_index: int,
+    stage_total: int,
+) -> tuple[StageResultProtocol, dict[str, Any] | None]:
+    orch = ctx.orch
+    if stage == "stage0_project_brief":
+        return orch._stage0_project_brief(ctx.task, run_dry=ctx.run_dry, cwd=orch.root), None
+
+    if stage == "stage1_exec_plan":
+        return _execute_stage1_exec_plan(ctx)
+
+    if stage == "stage2_codex_execute":
+        return _execute_stage2_codex_execute(ctx), None
+
+    if stage == "stage3_gemini_review":
+        if not ctx.worktree_path.exists():
+            ctx.worktree_path = orch.root
+        result = orch._stage3_gemini_review(run_dry=ctx.run_dry, cwd=ctx.worktree_path)
+        if ctx.worktree_path != orch.root:
+            sandbox_review = orch._artifact_abs("review", cwd=ctx.worktree_path)
+            root_review = orch._artifact_abs("review", cwd=orch.root)
+            if sandbox_review.exists():
+                orch._write_text(root_review, sandbox_review.read_text(encoding="utf-8"))
+        return result, None
+
+    if stage == "stage4_codex_fix":
+        if not ctx.worktree_path.exists():
+            ctx.worktree_path = orch.root
+        return orch._stage4_codex_fix(run_dry=ctx.run_dry, cwd=ctx.worktree_path), None
+
+    if stage == "stage5_final_review":
+        return (
+            _run_stage5_review_with_retry(
+                ctx,
+                stage_index=stage_index,
+                stage_total=stage_total,
+            ),
+            None,
+        )
+
+    return ctx.stage_result_cls(stage, False, {"error": "unknown stage"}), None
+
+
+def _run_pipeline_stage_loop(
+    ctx: PipelineRunContext,
+    *,
+    start_index: int,
+    stop_after: int | None,
+) -> dict[str, Any] | None:
+    total_stages = len(ctx.pipeline_stages)
+    for index, stage in enumerate(ctx.pipeline_stages[start_index:], start=start_index):
+        ctx.state["pipeline"]["current_stage"] = stage
+        ctx.orch.save_state(ctx.state)
+        stage_no = index + 1
+        LOGGER.info("[stage %s/%s] %s started", stage_no, total_stages, stage)
+        stage_started = perf_counter()
+
+        result, early_payload = _execute_stage(
+            ctx,
+            stage=stage,
+            stage_index=stage_no,
+            stage_total=total_stages,
+        )
+        if early_payload is not None:
+            return early_payload
+
+        stage_duration = round(perf_counter() - stage_started, 3)
+        _record_stage_entry(
+            ctx,
+            result=result,
+            stage_index=stage_no,
+            stage_total=total_stages,
+            stage_duration=stage_duration,
+        )
+        LOGGER.info(
+            "[stage %s/%s] %s %s (%.3fs)",
+            stage_no,
+            total_stages,
+            stage,
+            "PASS" if result.ok else "FAIL",
+            stage_duration,
+        )
+
+        if result.ok:
+            if stage not in ctx.state["pipeline"]["completed_stages"]:
+                ctx.state["pipeline"]["completed_stages"].append(stage)
+        else:
+            return _persist_pipeline_result(
+                ctx,
+                ok=False,
+                status="failed",
+                error=f"{stage} failed",
+                include_stage_results=True,
+            )
+
+        ctx.orch.save_state(ctx.state)
+        if stop_after is not None and index >= stop_after:
+            return _persist_pipeline_result(
+                ctx,
+                ok=True,
+                status=f"stopped_after_{index}",
+                error=str(ctx.state["pipeline"].get("last_error", "") or ""),
+                include_stage_results=True,
+                extra={"stopped_after": index},
+            )
+    return None
+
+
+def _finalize_pipeline_success(ctx: PipelineRunContext) -> dict[str, Any]:
+    if ctx.worktree_branch and not ctx.run_dry:
+        merged, merge_log = ctx.orch._merge_worktree_branch(ctx.worktree_branch)
+        if not merged:
+            return _persist_pipeline_result(
+                ctx,
+                ok=False,
+                status="failed",
+                error=f"merge failed: {merge_log}",
+                include_stage_results=True,
+            )
+        ctx.orch._remove_worktree(path=ctx.worktree_path, branch=ctx.worktree_branch, force=False)
+    return _persist_pipeline_result(
+        ctx,
+        ok=True,
+        status="completed",
+        error="",
+        include_stage_results=True,
+    )
+
+
+def run_pipeline(
+    orch: OrchestratorProtocol,
+    *,
+    task: str,
+    dry_run: bool | None = None,
+    stop_after: int | None = None,
+    resume: bool = False,
+    pipeline_stages: Sequence[str],
+    stage_result_cls: type[Any],
+    utc_now: Callable[[], str],
+) -> dict[str, Any]:
+    run_dry, mode = orch._resolve_mode(dry_run)
+    task = task.strip()
+    if not task:
+        raise ValueError("pipeline task 不能为空")
+
+    state = orch.load_state()
+    run_id_raw = str(state["pipeline"].get("run_id", "") or "").strip() if resume else ""
+    run_id = run_id_raw or _build_pipeline_run_id(task)
+    lock_state = _acquire_pipeline_lock(orch, run_id=run_id, task=task, utc_now=utc_now)
+    if not lock_state.acquired:
+        return _pipeline_lock_conflict_payload(lock_state, mode=mode)
+
+    ctx = _prepare_pipeline_context(
+        orch,
+        state=state,
+        lock_state=lock_state,
+        run_id=run_id,
+        task=task,
+        run_dry=run_dry,
+        mode=mode,
+        resume=resume,
+        pipeline_stages=pipeline_stages,
+        stage_result_cls=stage_result_cls,
+        utc_now=utc_now,
+    )
+
+    preflight_payload = _run_preflight(ctx)
+    if preflight_payload is not None:
+        return preflight_payload
+
+    start_index = 0
+    if resume and ctx.state["pipeline"]["current_stage"] in pipeline_stages:
+        start_index = pipeline_stages.index(ctx.state["pipeline"]["current_stage"])
+
+    try:
+        loop_payload = _run_pipeline_stage_loop(ctx, start_index=start_index, stop_after=stop_after)
+        if loop_payload is not None:
+            return loop_payload
+        return _finalize_pipeline_success(ctx)
+    except Exception as exc:
+        return _persist_pipeline_result(
+            ctx,
+            ok=False,
+            status="failed",
+            error=str(exc),
+            include_stage_results=True,
         )
 
 
 def run_resume(
-    orch: Any,
+    orch: OrchestratorProtocol,
     *,
     dry_run: bool | None = None,
     pipeline_stages: Sequence[str],
@@ -1021,7 +1118,78 @@ def run_resume(
     return resumed
 
 
-def run_cleanup(orch: Any) -> dict[str, Any]:
+def _parse_worktree_list(porcelain_text: str) -> list[tuple[Path, str]]:
+    entries: list[tuple[Path, str]] = []
+    current_path: str | None = None
+    current_branch = ""
+    for line in porcelain_text.splitlines() + [""]:
+        stripped = line.strip()
+        if not stripped:
+            if current_path:
+                entries.append((Path(current_path), current_branch))
+            current_path = None
+            current_branch = ""
+            continue
+        if stripped.startswith("worktree "):
+            current_path = stripped.split(" ", 1)[1].strip()
+            continue
+        if stripped.startswith("branch "):
+            ref = stripped.split(" ", 1)[1].strip()
+            prefix = "refs/heads/"
+            current_branch = ref[len(prefix) :] if ref.startswith(prefix) else ref
+    return entries
+
+
+def _is_orphan_sandbox_entry(path: Path, branch: str) -> bool:
+    return "omo-sandbox-" in str(path) or branch.startswith("omo-sandbox-")
+
+
+def _remove_orphan_sandbox_entry(
+    orch: OrchestratorProtocol,
+    *,
+    path: Path,
+    branch: str,
+) -> bool:
+    proc = orch._run_subprocess(
+        ["git", "-C", str(orch.root), "worktree", "remove", str(path), "--force"],
+    )
+    if proc.returncode != 0 and path.exists():
+        orch._remove_worktree(path=path, branch=branch, force=True)
+    if branch and branch.startswith("omo-sandbox-"):
+        orch._run_subprocess(["git", "-C", str(orch.root), "branch", "-D", branch])
+    return not path.exists()
+
+
+def _cleanup_orphan_worktrees(
+    orch: OrchestratorProtocol,
+    *,
+    removed: list[str],
+    skipped: list[str],
+    known_paths: set[str],
+) -> None:
+    proc = orch._run_subprocess(
+        ["git", "-C", str(orch.root), "worktree", "list", "--porcelain"],
+    )
+    if proc.returncode != 0:
+        LOGGER.warning("cleanup: failed to list git worktrees: %s", proc.stderr.strip())
+        return
+
+    for worktree_path, worktree_branch in _parse_worktree_list(proc.stdout or ""):
+        resolved = orch._resolve_path(worktree_path)
+        resolved_text = str(resolved)
+        if resolved_text in known_paths:
+            continue
+        if not _is_orphan_sandbox_entry(resolved, worktree_branch):
+            continue
+        if _remove_orphan_sandbox_entry(orch, path=resolved, branch=worktree_branch):
+            if resolved_text not in removed:
+                removed.append(resolved_text)
+            continue
+        if resolved_text not in skipped:
+            skipped.append(resolved_text)
+
+
+def run_cleanup(orch: OrchestratorProtocol) -> dict[str, Any]:
     state = orch.load_state()
     removed: list[str] = []
     skipped: list[str] = []
@@ -1052,6 +1220,16 @@ def run_cleanup(orch: Any) -> dict[str, Any]:
             sandbox_path = str(orch._resolve_path(sandbox))
             if sandbox_path not in removed:
                 removed.append(sandbox_path)
+
+    known_paths = {str(orch._resolve_path(sandbox))}
+    if worktree_path is not None:
+        known_paths.add(str(orch._resolve_path(worktree_path)))
+    _cleanup_orphan_worktrees(
+        orch,
+        removed=removed,
+        skipped=skipped,
+        known_paths=known_paths,
+    )
 
     state["last_action"] = "cleanup"
     state["pipeline"]["worktree_path"] = ""

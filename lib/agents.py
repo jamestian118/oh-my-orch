@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping, Sequence
@@ -20,6 +21,8 @@ _NON_INTERACTIVE_PREFIX = {
 }
 
 LOGGER = logging.getLogger(__name__)
+_MAX_RETRY_ATTEMPTS = 2
+_INITIAL_RETRY_BACKOFF_SEC = 0.5
 
 
 @dataclass(frozen=True, slots=True)
@@ -145,45 +148,71 @@ class CLIAgent:
                 cwd=self.cwd,
             )
 
-        try:
-            LOGGER.debug(
-                "subprocess command: %s (cwd=%s)",
-                format_command(command),
-                self.cwd or ".",
-            )
-            completed = subprocess.run(
-                command,
-                cwd=self.cwd,
-                env=self.env,
-                text=True,
-                capture_output=capture_output,
-                check=False,
-                timeout=timeout_sec,
-            )
-        except subprocess.TimeoutExpired as exc:
-            timeout_stdout = exc.stdout or ""
-            timeout_stderr = exc.stderr or ""
-            if isinstance(timeout_stdout, bytes):
-                timeout_stdout = timeout_stdout.decode("utf-8", errors="replace")
-            if isinstance(timeout_stderr, bytes):
-                timeout_stderr = timeout_stderr.decode("utf-8", errors="replace")
-            return AgentRunResult(
+        for retry in range(_MAX_RETRY_ATTEMPTS + 1):
+            try:
+                LOGGER.debug(
+                    "subprocess command: %s (cwd=%s)",
+                    format_command(command),
+                    self.cwd or ".",
+                )
+                completed = subprocess.run(
+                    command,
+                    cwd=self.cwd,
+                    env=self.env,
+                    text=True,
+                    capture_output=capture_output,
+                    check=False,
+                    timeout=timeout_sec,
+                )
+            except subprocess.TimeoutExpired as exc:
+                timeout_stdout = exc.stdout or ""
+                timeout_stderr = exc.stderr or ""
+                if isinstance(timeout_stdout, bytes):
+                    timeout_stdout = timeout_stdout.decode("utf-8", errors="replace")
+                if isinstance(timeout_stderr, bytes):
+                    timeout_stderr = timeout_stderr.decode("utf-8", errors="replace")
+                return AgentRunResult(
+                    tool=self.tool,
+                    mode=mode,
+                    command=tuple(command),
+                    returncode=124,
+                    stdout=timeout_stdout,
+                    stderr=f"timeout after {timeout_sec}s; {timeout_stderr}".strip(),
+                    dry_run=False,
+                    cwd=self.cwd,
+                )
+
+            result = AgentRunResult(
                 tool=self.tool,
                 mode=mode,
                 command=tuple(command),
-                returncode=124,
-                stdout=timeout_stdout,
-                stderr=f"timeout after {timeout_sec}s; {timeout_stderr}".strip(),
+                returncode=completed.returncode,
+                stdout=completed.stdout or "",
+                stderr=completed.stderr or "",
                 dry_run=False,
                 cwd=self.cwd,
             )
-        return AgentRunResult(
-            tool=self.tool,
-            mode=mode,
-            command=tuple(command),
-            returncode=completed.returncode,
-            stdout=completed.stdout or "",
-            stderr=completed.stderr or "",
-            dry_run=False,
-            cwd=self.cwd,
-        )
+            if not self._should_retry(result.returncode, retry):
+                return result
+
+            backoff_sec = _retry_backoff_seconds(retry)
+            LOGGER.warning(
+                "agent command failed with returncode=%s, retrying %s/%s in %.1fs",
+                result.returncode,
+                retry + 1,
+                _MAX_RETRY_ATTEMPTS,
+                backoff_sec,
+            )
+            time.sleep(backoff_sec)
+
+        return result
+
+    @staticmethod
+    def _should_retry(returncode: int, retry: int) -> bool:
+        if returncode == 0 or retry >= _MAX_RETRY_ATTEMPTS:
+            return False
+        return returncode not in {124, 130}
+
+
+def _retry_backoff_seconds(retry: int) -> float:
+    return _INITIAL_RETRY_BACKOFF_SEC * (2**retry)
