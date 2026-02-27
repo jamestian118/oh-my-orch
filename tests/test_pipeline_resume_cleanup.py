@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fcntl
 import json
 import sys
 
@@ -120,3 +121,27 @@ def test_stage1_skips_resume_when_shell_is_not_tty(tmp_path, monkeypatch) -> Non
     assert "non-interactive shell" in result.details["resume_skipped_reason"]
     assert len(calls) == 1
     assert (tmp_path / ".ai" / "exec-plan.md").exists()
+
+
+def test_pipeline_rejects_concurrent_run_when_lock_is_held(tmp_path) -> None:
+    orch = Orchestrator(root_dir=tmp_path, dry_run=True)
+    lock_file = tmp_path / ".omo" / "pipeline.lock"
+    pid_file = tmp_path / ".omo" / "pipeline.pid"
+    lock_file.parent.mkdir(parents=True, exist_ok=True)
+    pid_file.write_text(
+        json.dumps({"pid": 43210, "run_id": "existing-run"}, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+
+    with lock_file.open("a+", encoding="utf-8") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        result = orch.pipeline(task="并发 pipeline 冲突", dry_run=True)
+
+    assert result["ok"] is False
+    assert result["command"] == "pipeline"
+    assert result["mode"] == "dry-run"
+    assert "pipeline already running" in result["error"]
+    assert "pid=43210" in result["error"]
+    assert "run_id=existing-run" in result["error"]
+    assert result["lock_file"] == str(lock_file)
+    assert result["pid_file"] == str(pid_file)

@@ -23,6 +23,7 @@ CSM_ROOT = Path(os.environ.get("OMO_CSM_ROOT", str(HOME_CODE_ROOT / "claude-sess
 HANDOFF_ROOT = Path(
     os.environ.get("OMO_HANDOFF_ROOT", str(HOME_CODE_ROOT / "cli-handoff-bundle" / "_handoff"))
 )
+CSM_DRIVER = Path(__file__).with_name("csm_driver.py")
 
 
 @dataclass(slots=True)
@@ -151,86 +152,16 @@ class CSMIntegration:
     def _invoke(self, action: str, payload: dict[str, Any]) -> IntegrationResult:
         if not self.available:
             return IntegrationResult(ok=False, data={}, error=f"CSM unavailable: {self.csm_root}")
+        if not CSM_DRIVER.exists():
+            return IntegrationResult(ok=False, data={}, error=f"missing CSM driver: {CSM_DRIVER}")
 
-        driver = r"""
-import json
-import sys
-
-req = json.loads(sys.argv[1])
-root = req["root"]
-sys.path.insert(0, root)
-
-from lib.models import ToolType  # type: ignore
-from lib.store import load_session_detail, load_sessions  # type: ignore
-
-tool_map = {"claude": ToolType.CLAUDE, "codex": ToolType.CODEX, "gemini": ToolType.GEMINI}
-
-def to_summary(item):
-    return {
-        "session_id": item.session_id,
-        "tool": item.tool_type.label,
-        "tool_slug": item.tool_type.name.lower(),
-        "project": item.project,
-        "first_message": item.first_display,
-        "last_message": item.last_display,
-        "message_count": item.message_count,
-        "custom_name": item.custom_name or "",
-    }
-
-def to_detail(item):
-    messages = []
-    for m in item.messages:
-        role = getattr(m, "role", "")
-        if role in ("user", "assistant"):
-            messages.append(
-                {
-                    "role": role,
-                    "content": getattr(m, "content", ""),
-                    "timestamp": getattr(m, "timestamp", ""),
-                    "uuid": getattr(m, "uuid", ""),
-                }
-            )
-    return {
-        "session_id": item.session_id,
-        "tool": item.tool_type.label,
-        "tool_slug": item.tool_type.name.lower(),
-        "project": item.project,
-        "cwd": item.cwd,
-        "git_branch": item.git_branch,
-        "model_provider": item.model_provider,
-        "files_changed": item.files_changed,
-        "commands_run": item.commands_run,
-        "errors": item.errors,
-        "messages": messages,
-    }
-
-action = req["action"]
-if action == "list_sessions":
-    tool_filter = req.get("tool_filter", "")
-    limit = int(req.get("limit", 20))
-    tt = tool_map.get(tool_filter) if tool_filter else None
-    rows = load_sessions(tt)
-    print(json.dumps({"ok": True, "data": [to_summary(x) for x in rows[:limit]]}))
-elif action == "get_session_context":
-    session_id = req["session_id"]
-    tool_type = req["tool_type"]
-    project = req.get("project", "")
-    tt = tool_map.get(tool_type)
-    if not tt:
-        print(json.dumps({"ok": False, "error": f"unsupported tool_type: {tool_type}"}))
-    else:
-        detail = load_session_detail(session_id, tt, project)
-        print(json.dumps({"ok": True, "data": to_detail(detail) if detail else None}))
-else:
-    print(json.dumps({"ok": False, "error": f"unsupported action: {action}"}))
-"""
         args = {
             "root": str(self.csm_root),
             "action": action,
             **payload,
         }
         proc = subprocess.run(
-            [sys.executable, "-c", driver, json.dumps(args)],
+            [sys.executable, str(CSM_DRIVER), json.dumps(args)],
             capture_output=True,
             text=True,
             check=False,

@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import fcntl
 import json
+import os
 import re
 import sys
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Sequence
@@ -38,6 +41,107 @@ def _build_pipeline_run_id(task: str) -> str:
     summary_part = _task_summary(task)
     short_hash = uuid4().hex[:8]
     return f"{date_part}-{time_part}-{summary_part}-{short_hash}"
+
+
+@dataclass(slots=True)
+class PipelineLockState:
+    acquired: bool
+    lock_file: Path
+    pid_file: Path
+    handle: Any | None = None
+    owner_pid: int = 0
+    owner_run_id: str = ""
+
+
+def _read_pipeline_owner(pid_file: Path) -> tuple[int, str]:
+    if not pid_file.exists():
+        return 0, ""
+    try:
+        payload = json.loads(pid_file.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return 0, ""
+    if not isinstance(payload, dict):
+        return 0, ""
+    pid_raw = payload.get("pid", 0)
+    try:
+        pid = int(pid_raw)
+    except (TypeError, ValueError):
+        pid = 0
+    run_id = str(payload.get("run_id", "") or "")
+    return pid, run_id
+
+
+def _acquire_pipeline_lock(
+    orch: Any,
+    *,
+    run_id: str,
+    task: str,
+    utc_now: Callable[[], str],
+) -> PipelineLockState:
+    lock_file = orch.omo_dir / "pipeline.lock"
+    pid_file = orch.omo_dir / "pipeline.pid"
+    lock_file.parent.mkdir(parents=True, exist_ok=True)
+    handle = lock_file.open("a+", encoding="utf-8")
+
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        owner_pid, owner_run_id = _read_pipeline_owner(pid_file)
+        handle.close()
+        return PipelineLockState(
+            acquired=False,
+            lock_file=lock_file,
+            pid_file=pid_file,
+            owner_pid=owner_pid,
+            owner_run_id=owner_run_id,
+        )
+
+    payload = {
+        "pid": os.getpid(),
+        "run_id": run_id,
+        "task": task,
+        "started_at": utc_now(),
+    }
+    pid_file.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return PipelineLockState(
+        acquired=True,
+        lock_file=lock_file,
+        pid_file=pid_file,
+        handle=handle,
+        owner_pid=int(payload["pid"]),
+        owner_run_id=run_id,
+    )
+
+
+def _release_pipeline_lock(lock_state: PipelineLockState) -> None:
+    if lock_state.handle is None:
+        return
+    try:
+        fcntl.flock(lock_state.handle.fileno(), fcntl.LOCK_UN)
+    except OSError:
+        pass
+    try:
+        lock_state.handle.close()
+    except OSError:
+        pass
+    lock_state.handle = None
+    if not lock_state.acquired:
+        return
+    try:
+        lock_state.pid_file.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def _return_with_lock_release(
+    lock_state: PipelineLockState,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    _release_pipeline_lock(lock_state)
+    return payload
 
 
 def _copy_text(src: Path, dst: Path) -> bool:
@@ -333,6 +437,25 @@ def run_pipeline(
 
     run_id_raw = str(state["pipeline"].get("run_id", "") or "").strip() if resume else ""
     run_id = run_id_raw or _build_pipeline_run_id(task)
+    lock_state = _acquire_pipeline_lock(orch, run_id=run_id, task=task, utc_now=utc_now)
+    if not lock_state.acquired:
+        owner = []
+        if lock_state.owner_pid:
+            owner.append(f"pid={lock_state.owner_pid}")
+        if lock_state.owner_run_id:
+            owner.append(f"run_id={lock_state.owner_run_id}")
+        owner_hint = f" ({', '.join(owner)})" if owner else ""
+        return _return_with_lock_release(
+            lock_state,
+            {
+                "ok": False,
+                "command": "pipeline",
+                "mode": mode,
+                "error": f"pipeline already running{owner_hint}",
+                "lock_file": str(lock_state.lock_file),
+                "pid_file": str(lock_state.pid_file),
+            },
+        )
 
     run_dir_raw = str(state["pipeline"].get("run_dir", "") or "").strip() if resume else ""
     run_dir = Path(run_dir_raw) if run_dir_raw else pipeline_root / "runs" / run_id
@@ -383,7 +506,20 @@ def run_pipeline(
     stage_results: list[dict[str, Any]] = []
 
     if not run_dry:
-        preflight = orch.integrations.policy_check(cwd=orch.root)
+        try:
+            preflight = orch.integrations.policy_check(cwd=orch.root)
+        except Exception as exc:  # pragma: no cover - defensive integration boundary.
+            return _return_with_lock_release(
+                lock_state,
+                {
+                    "ok": False,
+                    "command": "pipeline",
+                    "mode": mode,
+                    "error": f"policy check exception: {exc}",
+                    "lock_file": str(lock_state.lock_file),
+                    "pid_file": str(lock_state.pid_file),
+                },
+            )
         if not preflight.ok:
             state["pipeline"]["status"] = "blocked"
             state["pipeline"]["last_error"] = preflight.error or "policy check failed"
@@ -402,13 +538,16 @@ def run_pipeline(
                 worktree_branch=worktree_branch,
             )
             orch.save_state(state)
-            return {
-                "ok": False,
-                "command": "pipeline",
-                "mode": mode,
-                "error": state["pipeline"]["last_error"],
-                **persisted,
-            }
+            return _return_with_lock_release(
+                lock_state,
+                {
+                    "ok": False,
+                    "command": "pipeline",
+                    "mode": mode,
+                    "error": state["pipeline"]["last_error"],
+                    **persisted,
+                },
+            )
 
     start_index = 0
     if resume and state["pipeline"]["current_stage"] in pipeline_stages:
@@ -448,14 +587,17 @@ def run_pipeline(
                             worktree_branch=worktree_branch,
                         )
                         orch.save_state(state)
-                        return {
-                            "ok": False,
-                            "command": "pipeline",
-                            "mode": mode,
-                            "stage_results": stage_results,
-                            "error": state["pipeline"]["last_error"],
-                            **persisted,
-                        }
+                        return _return_with_lock_release(
+                            lock_state,
+                            {
+                                "ok": False,
+                                "command": "pipeline",
+                                "mode": mode,
+                                "stage_results": stage_results,
+                                "error": state["pipeline"]["last_error"],
+                                **persisted,
+                            },
+                        )
 
                 history_text = orch._history_text(limit=120)
                 compact = orch.context.compress_context(
@@ -549,14 +691,17 @@ def run_pipeline(
                     worktree_branch=worktree_branch,
                 )
                 orch.save_state(state)
-                return {
-                    "ok": False,
-                    "command": "pipeline",
-                    "mode": mode,
-                    "stage_results": stage_results,
-                    "error": state["pipeline"]["last_error"],
-                    **persisted,
-                }
+                return _return_with_lock_release(
+                    lock_state,
+                    {
+                        "ok": False,
+                        "command": "pipeline",
+                        "mode": mode,
+                        "stage_results": stage_results,
+                        "error": state["pipeline"]["last_error"],
+                        **persisted,
+                    },
+                )
 
             orch.save_state(state)
             if stop_after is not None and index >= stop_after:
@@ -575,15 +720,18 @@ def run_pipeline(
                     worktree_branch=worktree_branch,
                 )
                 orch.save_state(state)
-                return {
-                    "ok": True,
-                    "command": "pipeline",
-                    "mode": mode,
-                    "stopped_after": index,
-                    "stage_results": stage_results,
-                    "state_file": str(orch.state_path),
-                    **persisted,
-                }
+                return _return_with_lock_release(
+                    lock_state,
+                    {
+                        "ok": True,
+                        "command": "pipeline",
+                        "mode": mode,
+                        "stopped_after": index,
+                        "stage_results": stage_results,
+                        "state_file": str(orch.state_path),
+                        **persisted,
+                    },
+                )
 
         if worktree_branch and not run_dry:
             merged, merge_log = orch._merge_worktree_branch(worktree_branch)
@@ -605,14 +753,17 @@ def run_pipeline(
                     worktree_branch=worktree_branch,
                 )
                 orch.save_state(state)
-                return {
-                    "ok": False,
-                    "command": "pipeline",
-                    "mode": mode,
-                    "stage_results": stage_results,
-                    "error": state["pipeline"]["last_error"],
-                    **persisted,
-                }
+                return _return_with_lock_release(
+                    lock_state,
+                    {
+                        "ok": False,
+                        "command": "pipeline",
+                        "mode": mode,
+                        "stage_results": stage_results,
+                        "error": state["pipeline"]["last_error"],
+                        **persisted,
+                    },
+                )
             orch._remove_worktree(path=worktree_path, branch=worktree_branch, force=False)
 
         state["pipeline"]["status"] = "completed"
@@ -634,14 +785,17 @@ def run_pipeline(
             worktree_branch=worktree_branch,
         )
         orch.save_state(state)
-        return {
-            "ok": True,
-            "command": "pipeline",
-            "mode": mode,
-            "stage_results": stage_results,
-            "state_file": str(orch.state_path),
-            **persisted,
-        }
+        return _return_with_lock_release(
+            lock_state,
+            {
+                "ok": True,
+                "command": "pipeline",
+                "mode": mode,
+                "stage_results": stage_results,
+                "state_file": str(orch.state_path),
+                **persisted,
+            },
+        )
     except Exception as exc:
         state["pipeline"]["status"] = "failed"
         state["pipeline"]["last_error"] = str(exc)
@@ -660,14 +814,17 @@ def run_pipeline(
             worktree_branch=worktree_branch,
         )
         orch.save_state(state)
-        return {
-            "ok": False,
-            "command": "pipeline",
-            "mode": mode,
-            "stage_results": stage_results,
-            "error": str(exc),
-            **persisted,
-        }
+        return _return_with_lock_release(
+            lock_state,
+            {
+                "ok": False,
+                "command": "pipeline",
+                "mode": mode,
+                "stage_results": stage_results,
+                "error": str(exc),
+                **persisted,
+            },
+        )
 
 
 def run_resume(

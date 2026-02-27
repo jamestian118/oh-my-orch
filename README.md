@@ -67,6 +67,7 @@ python omo.py pipeline "接入 SSO 登录"
 - Pipeline 产物目录：`.ai/pipeline/runs/<run-id>/`（每次运行新目录；`run-id` 命名为“日期-时间-梗概-短哈希”：`YYYYMMDD-HHMMSS-<summary>-<short-hash>`，时间为北京时间 `Asia/Shanghai`；含 `project-brief.md`、`exec-plan.md`、`review.md`、`pipeline-summary.md`、`meta.json`）
 - Pipeline 最新快照：`.ai/pipeline/latest/`（含 `pipeline-summary.md`、`run.json`）
 - Pipeline decisions artifacts：`.omo/runs/pipeline/<run-id>/decisions.jsonl`（按 stage 记录决策；latest pointer 在 `.omo/latest/pipeline.json` 的 `decisions_file` 字段）
+- Pipeline 并发防护：`.omo/pipeline.lock`（`fcntl.flock` 互斥锁）与 `.omo/pipeline.pid`（运行中 PID + run_id 元数据）
 - Team 产物目录：`.ai/team/runs/<run-id>/`（`run-id` 同样使用北京时间 `Asia/Shanghai`，格式 `YYYYMMDD-HHMMSS-<summary>-<short-hash>`；示例：`20260223-184512-auth-refactor-a1b2c3d4`；含 `agents/*.md`、`team-summary.md`、`meta.json`）
 - Team decisions artifacts：`.ai/team/runs/<run-id>/decisions/`（`context-pack.json`、`codex.json`、`gemini.json`、`arbiter.json`）
 - Team 最新摘要：`.ai/team/latest/team-summary.md`
@@ -88,6 +89,7 @@ python omo.py pipeline "接入 SSO 登录"
 - `pipeline` 卡在策略检查：先手动运行  
   `./scripts/verify` 与  
   `$HOME/Documents/Code/universal-harness-kit/scripts/agent-policy-stack --tool codex --cwd "$PWD" --strict --strict-profile harness`
+- `pipeline already running`：说明当前目录已有 pipeline run 持有锁；检查 `.omo/pipeline.pid` 的 `pid/run_id`，等待前一任务结束后重试
 - 真实 CLI 调用失败：先验证 `claude/codex/gemini` 在当前 shell 可执行并已登录，再重跑命令
 - 需要快速清理残留 worktree：执行 `python omo.py cleanup`
 
@@ -160,6 +162,7 @@ python omo.py pipeline "Integrate SSO login"
 - Pipeline artifacts: `.ai/pipeline/runs/<run-id>/` (new directory per run; `run-id` format `YYYYMMDD-HHMMSS-<summary>-<short-hash>` in Beijing time `Asia/Shanghai`; includes `project-brief.md`, `exec-plan.md`, `review.md`, `pipeline-summary.md`, `meta.json`)
 - Latest pipeline snapshot: `.ai/pipeline/latest/` (contains `pipeline-summary.md`, `run.json`)
 - Pipeline decisions artifacts: `.omo/runs/pipeline/<run-id>/decisions.jsonl` (stage-level decisions; latest pointer is the `decisions_file` field in `.omo/latest/pipeline.json`)
+- Pipeline concurrency guard: `.omo/pipeline.lock` (`fcntl.flock` mutex) and `.omo/pipeline.pid` (active PID + run_id metadata)
 - Team artifacts: `.ai/team/runs/<run-id>/` (`run-id` also uses Beijing time `Asia/Shanghai` with `YYYYMMDD-HHMMSS-<summary>-<short-hash>`; example: `20260223-184512-auth-refactor-a1b2c3d4`; includes `agents/*.md`, `team-summary.md`, `meta.json`)
 - Team decisions artifacts: `.ai/team/runs/<run-id>/decisions/` (`context-pack.json`, `codex.json`, `gemini.json`, `arbiter.json`)
 - Latest team summary: `.ai/team/latest/team-summary.md`
@@ -181,5 +184,6 @@ python omo.py pipeline "Integrate SSO login"
 - Pipeline blocked by policy checks: run  
   `./scripts/verify` and  
   `$HOME/Documents/Code/universal-harness-kit/scripts/agent-policy-stack --tool codex --cwd "$PWD" --strict --strict-profile harness`
+- `pipeline already running`: another pipeline run currently owns the lock; inspect `pid/run_id` in `.omo/pipeline.pid` and retry after it completes
 - Live CLI failures: verify `claude/codex/gemini` availability and auth in your current shell
 - To clean residual worktree quickly: run `python omo.py cleanup`

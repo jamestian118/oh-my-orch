@@ -156,9 +156,9 @@ def test_team_live_empty_stdout_marks_failure_and_status(tmp_path, monkeypatch) 
         return bool(step.get("skipped")) or bool(step.get("fallback"))
 
     assert result["summary_steps"], "summary_steps 不能为空"
-    assert all(
-        _is_step_marked(step) for step in result["summary_steps"]
-    ), "summary_steps 未按失败路径标记 skipped/fallback"
+    assert all(_is_step_marked(step) for step in result["summary_steps"]), (
+        "summary_steps 未按失败路径标记 skipped/fallback"
+    )
 
     meta = json.loads(Path(result["meta_file"]).read_text(encoding="utf-8"))
     assert "viewpoints_ok" in meta, "meta.json 缺少新增状态字段 viewpoints_ok"

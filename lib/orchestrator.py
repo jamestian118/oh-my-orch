@@ -589,7 +589,7 @@ class Orchestrator:
         )
         final_prompt = prompt
         if compressed.used_fallback or compressed.compressed:
-            final_prompt = "以下是上下文摘要：\n" f"{compressed.summary}\n\n" f"当前请求：{prompt}"
+            final_prompt = f"以下是上下文摘要：\n{compressed.summary}\n\n当前请求：{prompt}"
 
         result = self._run_agent(
             agent=target,

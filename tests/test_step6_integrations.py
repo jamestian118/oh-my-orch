@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import json
+import subprocess
+import sys
 from pathlib import Path
 
+import lib.integrations as integrations
 from lib.integrations import CSMIntegration, HandoffIntegration, build_integrations
 
 
@@ -49,3 +53,39 @@ def test_handoff_integration_prefers_richer_snapshot(tmp_path, monkeypatch) -> N
     assert result.ok is True
     assert Path(result.data["path"]) == local_path
     assert "Repo State" in result.data["content"]
+
+
+def test_csm_integration_invokes_external_driver_file(tmp_path, monkeypatch) -> None:
+    csm_root = tmp_path / "csm"
+    csm_lib = csm_root / "lib"
+    csm_lib.mkdir(parents=True)
+    (csm_lib / "store.py").write_text("# stub store\n", encoding="utf-8")
+    (csm_lib / "models.py").write_text("# stub models\n", encoding="utf-8")
+
+    captured: dict[str, object] = {}
+
+    def fake_run(cmd: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+        captured["cmd"] = cmd
+        return subprocess.CompletedProcess(
+            args=cmd,
+            returncode=0,
+            stdout='{"ok": true, "data": []}',
+            stderr="",
+        )
+
+    monkeypatch.setattr(integrations.subprocess, "run", fake_run)
+
+    result = CSMIntegration(csm_root=csm_root).list_sessions(tool_filter="codex", limit=7)
+
+    assert result.ok is True
+    command = captured["cmd"]
+    assert isinstance(command, list)
+    assert command[0] == sys.executable
+    assert command[1].endswith("csm_driver.py")
+    assert "-c" not in command
+
+    payload = json.loads(command[2])
+    assert payload["root"] == str(csm_root)
+    assert payload["action"] == "list_sessions"
+    assert payload["tool_filter"] == "codex"
+    assert payload["limit"] == 7

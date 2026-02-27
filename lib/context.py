@@ -107,8 +107,7 @@ class ContextManager:
         agent = _normalize_agent(target_agent)
         focus_map = {
             "codex": (
-                "重点写清需要修改的文件、目标行为、验收命令。"
-                "保留任务拆解与执行顺序，减少抽象讨论。"
+                "重点写清需要修改的文件、目标行为、验收命令。保留任务拆解与执行顺序，减少抽象讨论。"
             ),
             "claude": "重点写清设计决策、约束条件、权衡与风险。",
             "gemini": "重点写清原始方案意图、变更范围、review 关注点。",

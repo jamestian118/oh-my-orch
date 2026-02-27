@@ -3,6 +3,31 @@
 > 规则：动态进度只写在这里；不要把动态内容写进 docs/ 或长期规范文件。
 
 ## 最新交接（追加在最上方）
+- Date：2026-02-27 20:13:25 (Asia/Shanghai)
+- Branch：ai/20260227-phase0-upgrade
+- Commit：de36321
+- git status（摘要）：`M README.md`、`M lib/context.py`、`M lib/integrations.py`、`M lib/orchestrator.py`、`M lib/orchestrator_pipeline.py`、`M tests/test_pipeline_resume_cleanup.py`、`M tests/test_step3_to_step5_orchestrator.py`、`M tests/test_step6_integrations.py`、`?? lib/csm_driver.py`
+- 最小验证命令：`./scripts/verify`、`./scripts/secrets-check`
+- 关键输出摘录（key output excerpts）：
+  - `./scripts/verify -> [verify] OK`
+  - `pytest -> 39 passed in 23.49s`
+  - `./scripts/secrets-check -> [secrets-check] OK`
+  - `pipeline 并发冲突路径返回: pipeline already running (pid=..., run_id=...)`
+
+### Done
+- 完成 1.14：`lib/integrations.py` 移除内联 `driver = """..."""`，新增独立驱动文件 `lib/csm_driver.py`，`CSMIntegration` 改为 `python <driver.py> <json payload>` 调用。
+- 完成 1.15：`lib/orchestrator_pipeline.py` 新增 `pipeline.lock + pipeline.pid` 互斥机制，基于 `fcntl.flock(LOCK_EX|LOCK_NB)` 拒绝并发 pipeline run，并返回持有者 `pid/run_id`。
+- 新增测试：
+  - `tests/test_step6_integrations.py::test_csm_integration_invokes_external_driver_file`
+  - `tests/test_pipeline_resume_cleanup.py::test_pipeline_rejects_concurrent_run_when_lock_is_held`
+- 双语 usage 文档同步：`README.md` 补充 pipeline 并发锁文件与排障说明（ZH/EN）。
+
+### Next Steps（3-8 条，按优先级）
+1. 提交本阶段改动（1.14 + 1.15 + docs + tests）。
+2. 如需保留 crash 现场，可评估在异常退出时选择“保留 pid 文件并附 stale 标记”的策略（当前为成功/失败后清理 pid 文件）。
+3. 如需更强可观测性，可在 `status` 命令增加 lock owner 展示（读取 `.omo/pipeline.pid`）。
+
+## 上一交接（2026-02-24 00:46:14）
 - Date：2026-02-24 00:46:14 (Asia/Shanghai)
 - Branch：ai/20260223-omo-step1-6
 - Commit：d0a06db
