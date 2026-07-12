@@ -11,6 +11,8 @@ for arg in "$@"; do [ "$arg" = "--strict" ] && STRICT=1; done
 cd "$(dirname "$0")/.." || exit 0
 
 drift=0
+# 排除 runtime artifacts，避免会话产物中的文本触发误报
+RUNTIME_ARTIFACT_REGEX='^\./\.ai/(team/|pipeline/(runs/|latest/))'
 
 echo "=== [gc] Drift Report ==="
 
@@ -34,6 +36,7 @@ echo "--- 检查 2: 裸 TODO ---"
 bare=$(grep -rn "TODO" --include="*" . \
   --exclude-dir=.git --exclude-dir=node_modules --exclude-dir=.venv \
   --exclude=gc --exclude=quality.md --exclude=scripts.md \
+  | grep -Ev "$RUNTIME_ARTIFACT_REGEX" \
   | grep -v "TODO(#" | grep -v "TODO(20" || true)
 if [ -n "$bare" ]; then
   echo "$bare"
@@ -51,17 +54,20 @@ if [ -d docs ]; then
   fi
 fi
 
-# 检查 4：src/ 下重复函数名
+# 检查 4：src/ + lib/ 下重复函数名
 echo ""
 echo "--- 检查 4: 重复函数定义 ---"
-if [ -d src ]; then
-  dupes=$(grep -rhn '\(def \|function \|func \)\([a-zA-Z_][a-zA-Z0-9_]*\)' src/ \
+dup_scan_dirs=()
+[ -d "src" ] && dup_scan_dirs+=("src")
+[ -d "lib" ] && dup_scan_dirs+=("lib")
+if [ "${#dup_scan_dirs[@]}" -gt 0 ]; then
+  dupes=$(grep -rhn '\(def \|function \|func \)\([a-zA-Z_][a-zA-Z0-9_]*\)' "${dup_scan_dirs[@]}" \
     --include="*.py" --include="*.js" --include="*.ts" --include="*.go" \
     -o 2>/dev/null \
     | sed 's/^def //;s/^function //;s/^func //' | sort | uniq -d || true)
   if [ -n "$dupes" ]; then
     for fn in $dupes; do
-      files=$(grep -rln "\(def \|function \|func \)$fn" src/ --include="*.py" --include="*.js" --include="*.ts" --include="*.go" 2>/dev/null || true)
+      files=$(grep -rln "\(def \|function \|func \)$fn" "${dup_scan_dirs[@]}" --include="*.py" --include="*.js" --include="*.ts" --include="*.go" 2>/dev/null || true)
       echo "[DRIFT] 重复函数 '$fn' 出现在: $files"
     done
     drift=1

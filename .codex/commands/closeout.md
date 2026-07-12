@@ -42,7 +42,7 @@ PY
 - Next Steps（3-8 条）
 
 7. Lessons Learned 同步：
-- 将本次 Lessons Learned 追加到 `/Users/Zhuanz/Documents/Code/universal-harness-kit/.ai/lessons-learned.md`
+- 将本次 Lessons Learned 追加到 `$HOME/Documents/Code/universal-harness-kit/.ai/lessons-learned.md`
 - 若同类问题出现 ≥2 次，提议升级为 golden principle 或机械化检查
 
 ## Pass/Fail 规则

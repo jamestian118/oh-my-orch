@@ -5,7 +5,7 @@
 - 让代码结构与边界对 agent 可读，并可逐步被 CI/linters 强制（invariants）
 
 ### 不变式（Invariants）
-- 依赖方向：tests/ 可以 import src/；src/ 不可 import tests/；scripts/ 不参与 import（由 `./scripts/arch-check` 自动检测）
+- 依赖方向：tests/ 可以 import src/ 与 lib/；src/ 与 lib/ 不可 import tests/；scripts/ 不参与 import（由 `./scripts/arch-check` 自动检测）
 - 边界校验：外部输入（HTTP request body、CLI args、env vars、file I/O）必须在入口处做 schema/type 校验
 - 外部系统访问：所有外部 HTTP/DB/MQ 调用必须通过 src/clients/ 目录下的统一 client（集中重试/限流/观测）
 
@@ -35,7 +35,7 @@ src/ 内部按以下层级组织，依赖只允许从高层指向低层，同层
 - Make structure & boundaries legible to agents, enforce via CI/linters (invariants)
 
 ### Invariants
-- Dependency direction: tests/ may import src/; src/ must NOT import tests/; scripts/ does not participate in imports (enforced by `./scripts/arch-check`)
+- Dependency direction: tests/ may import src/ and lib/; src/ and lib/ must NOT import tests/; scripts/ does not participate in imports (enforced by `./scripts/arch-check`)
 - Boundary validation: external inputs (HTTP request body, CLI args, env vars, file I/O) must be validated with schema/type at entry points
 - External access: all external HTTP/DB/MQ calls must go through unified clients under src/clients/ (retries/rate-limit/observability centralized)
 
@@ -59,3 +59,29 @@ Enforced by `./scripts/arch-check`.
 ### Verification
 - Local: ./scripts/verify
 - CI: .github/workflows/verify.yml
+
+## Team Decision Arbiter（Integrated with Gate）
+### 中文（ZH）
+- 模块：`lib/decision_arbiter.py`（已接入 `team` 主流程）
+- 位置：`codex/gemini` 结构化决策产出后、`team-summary` 汇总前，输出 `winner`、`confidence`、`ask`、`conflicts`。
+- 决策产物：`.ai/team/runs/<run-id>/decisions/` 下落盘 `context-pack.json`、`codex.json`、`gemini.json`、`arbiter.json`，用于审计与复现。
+- Gate 控制：`OMO_TEAM_ARBITER_GATE=off|soft|strict`；默认兼容策略为 `soft`（保留历史输出契约，仅附加 arbiter 决策，不自动阻断），`strict` 才执行 fail-fast 阻断，`off` 完全回退旧行为。
+- `team` 返回 `exit_code` 语义：`0` 表示成功；`1` 表示一般失败；`42` 表示 `OMO_TEAM_ARBITER_GATE=strict` 且 arbiter 判定 `ask/fail-fast` 时的 gate 阻断。
+
+### English (EN)
+- Module: `lib/decision_arbiter.py` (wired into the `team` runtime path)
+- Placement: after structured `codex/gemini` decisions and before final `team-summary`, returning `winner`, `confidence`, `ask`, and `conflicts`.
+- Decision artifacts: `.ai/team/runs/<run-id>/decisions/` persists `context-pack.json`, `codex.json`, `gemini.json`, and `arbiter.json` for auditability and replay.
+- Gate control: `OMO_TEAM_ARBITER_GATE=off|soft|strict`; default compatibility strategy is `soft` (keep legacy output contract, append arbiter decisions, no automatic blocking), while `strict` enforces fail-fast blocking and `off` fully falls back to legacy behavior.
+- `team` return `exit_code` semantics: `0` means success; `1` means general failure; `42` means gate blocking when `OMO_TEAM_ARBITER_GATE=strict` and arbiter reports `ask/fail-fast`.
+
+## Pipeline Decisions Artifacts
+### 中文（ZH）
+- 路径：`.omo/runs/pipeline/<run-id>/decisions.jsonl`
+- 最新指针：`.omo/latest/pipeline.json` 的 `decisions_file` 字段。
+- 用途：按 stage 记录 pipeline 决策，便于审计与复现。
+
+### English (EN)
+- Path: `.omo/runs/pipeline/<run-id>/decisions.jsonl`
+- Latest pointer: `decisions_file` in `.omo/latest/pipeline.json`.
+- Purpose: stage-level pipeline decision records for auditability and replay.
